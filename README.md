@@ -47,14 +47,21 @@ The server will start on port 8000 by default.
 GET /health
 ```
 
-Returns the server status.
+Returns the server status and timestamp.
 
-### Webhook
+### Activities Webhook
 ```bash
-POST /webhook?secret=YOUR_WEBHOOK_SECRET
+POST /activities?secret=YOUR_WEBHOOK_SECRET
 ```
 
-Receives transaction events from Sim's Subscriptions API. The webhook URL should include your `WEBHOOK_SECRET` as a query parameter for basic security.
+Receives activity payloads from Sim's Subscriptions API. Stores raw payloads in Deno KV for deduplication and traceability.
+
+### Transactions Webhook
+```bash
+POST /transactions?secret=YOUR_WEBHOOK_SECRET
+```
+
+Receives transaction payloads from Sim's Subscriptions API. Stores raw payloads in Deno KV with comprehensive logging of transaction details including gas, decoded data, and event logs.
 
 ## Development Roadmap
 
@@ -73,25 +80,48 @@ Test the health endpoint:
 curl http://localhost:8000/health
 ```
 
-Test the webhook endpoint:
+Test the transactions webhook endpoint:
 ```bash
-curl -X POST "http://localhost:8000/webhook?secret=dev-secret-123" \
+curl -X POST "http://localhost:8000/transactions?secret=dev-secret-123" \
   -H "Content-Type: application/json" \
   -d '{
-    "id": "test-123",
-    "type": "transaction",
-    "data": {
-      "transaction": {
-        "hash": "0xtest",
-        "from": "0x1234",
-        "to": "0x5678",
-        "blockNumber": 12345,
-        "timestamp": 1234567890,
-        "chainId": 1
-      }
-    }
+    "transactions": [{
+      "hash": "0xtest",
+      "from": "0x1234",
+      "to": "0x5678",
+      "chain": "ethereum",
+      "chain_id": 1,
+      "block_number": 12345,
+      "block_time": "2024-01-01T00:00:00Z",
+      "transaction_type": "contract_execution",
+      "success": true,
+      "value": "1000000000000000000",
+      "logs": []
+    }]
   }'
 ```
+
+Test the activities webhook endpoint:
+```bash
+curl -X POST "http://localhost:8000/activities?secret=dev-secret-123" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "activities": [{
+      "type": "erc20_transfer",
+      "chain_id": 1,
+      "block_number": 12345,
+      "tx_hash": "0xtest"
+    }]
+  }'
+```
+
+## Features
+
+- **Deno KV Storage**: Automatically stores all webhook payloads with deduplication
+- **Idempotent**: Uses webhook IDs or SHA-256 hashes to prevent duplicate storage on retries
+- **Comprehensive Logging**: Detailed request/response logging with transaction breakdowns
+- **Security**: URL secret-based authentication for webhook endpoints
+- **Fast Response**: Responds quickly to avoid webhook retry behavior
 
 ## License
 

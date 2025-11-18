@@ -63,6 +63,13 @@ POST /transactions?secret=YOUR_WEBHOOK_SECRET
 
 Receives transaction payloads from Sim's Subscriptions API. Stores raw payloads in Deno KV with comprehensive logging of transaction details including gas, decoded data, and event logs.
 
+### Balances Webhook
+```bash
+POST /balances?secret=YOUR_WEBHOOK_SECRET
+```
+
+Receives balance change payloads from Sim's Subscriptions API. Stores raw payloads in Deno KV and logs balance change direction counts and asset information.
+
 ## Development Roadmap
 
 - [x] Step 1: Build webhook server infrastructure
@@ -111,6 +118,24 @@ curl -X POST "http://localhost:8000/activities?secret=dev-secret-123" \
       "chain_id": 1,
       "block_number": 12345,
       "tx_hash": "0xtest"
+    }]
+  }'
+```
+
+Test the balances webhook endpoint:
+```bash
+curl -X POST "http://localhost:8000/balances?secret=dev-secret-123" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "balance_changes": [{
+      "amount_delta": "392126",
+      "direction": "in",
+      "asset": {
+        "symbol": "USDC",
+        "decimals": 6
+      },
+      "subscribed_address": "0xf70da97812cb96acdf810712aa562db8dfa3dbef",
+      "transaction_hash": "0x51a97de72ba1fb37f74046706147eb9469e7e90f2ab3671c6cca99a8111e74f0"
     }]
   }'
 ```

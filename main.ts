@@ -2,6 +2,7 @@
 // Webhook server for Sim API subscriptions with KV storage
 // - POST /activities       (activity payloads from Sim)
 // - POST /transactions     (transaction payloads from Sim)
+// - POST /balances         (balance change payloads from Sim)
 // - GET  /health           (health check)
 // Run: deno task start
 
@@ -74,7 +75,7 @@ Deno.serve(async (req) => {
 
   // Verify webhook secret for all webhook endpoints
   const secret = searchParams.get("secret");
-  const isWebhookPath = pathname === "/activities" || pathname === "/transactions";
+  const isWebhookPath = pathname === "/activities" || pathname === "/transactions" || pathname === "/balances";
   if (isWebhookPath && req.method === "POST" && secret !== WEBHOOK_SECRET) {
     console.warn("Unauthorized webhook attempt:", pathname);
     return new Response(JSON.stringify({ error: "Unauthorized" }), {
@@ -193,6 +194,71 @@ Deno.serve(async (req) => {
         received: txs.length,
         type_counts: typeCounts,
         success_counts: successCounts,
+        received_at: nowISO(),
+        duration_ms: Math.round(performance.now() - start),
+      }, null, 2),
+      { status: 200, headers: { "content-type": "application/json; charset=utf-8" } },
+    );
+  }
+
+  // ---------- /balances ----------
+  if (pathname === "/balances" && req.method === "GET") {
+    return new Response(
+      JSON.stringify({ ok: true, message: "POST balance change payloads to this endpoint." }),
+      { status: 200, headers: { "content-type": "application/json; charset=utf-8" } },
+    );
+  }
+
+  if (pathname === "/balances" && req.method === "POST") {
+    await kvStoreRaw("balances", req, rawBody);
+
+    // deno-lint-ignore no-explicit-any
+    let parsed: any;
+    try {
+      parsed = rawBody ? JSON.parse(rawBody) : undefined;
+    } catch (err) {
+      console.error("JSON parse error:", err);
+      return new Response("Invalid JSON body", {
+        status: 400,
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      });
+    }
+
+    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.balance_changes)) {
+      console.warn("Validation failed: expected { balance_changes: [] }");
+      return new Response("Body must be an object with a 'balance_changes' array.", {
+        status: 422,
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      });
+    }
+
+    const changes = parsed.balance_changes;
+    const directionCounts: Record<string, number> = { in: 0, out: 0 };
+    const assetSymbols = new Set<string>();
+    
+    for (const change of changes) {
+      const dir = change?.direction ?? "unknown";
+      directionCounts[dir] = (directionCounts[dir] ?? 0) + 1;
+      if (change?.asset?.symbol) {
+        assetSymbols.add(change.asset.symbol);
+      }
+    }
+
+    console.log(
+      `Received ${changes.length} balance changes - direction:`,
+      directionCounts,
+      "assets:",
+      Array.from(assetSymbols).join(", ")
+    );
+
+    // TODO: Process whale balance changes and send to Telegram (later step)
+
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        received: changes.length,
+        direction_counts: directionCounts,
+        unique_assets: assetSymbols.size,
         received_at: nowISO(),
         duration_ms: Math.round(performance.now() - start),
       }, null, 2),

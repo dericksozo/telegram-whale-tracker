@@ -1,0 +1,14 @@
+# Environment variables
+.env
+.env.local
+
+# Deno
+.deno/
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+

@@ -15,7 +15,7 @@ const _SIM_API_KEY = Deno.env.get("SIM_API_KEY") || "sim_3HEp7EPlougJMPs9GhCOXVj
 
 // Telegram Bot Configuration
 const TELEGRAM_BOT_TOKEN = Deno.env.get("TELEGRAM_BOT_TOKEN") || "8463582584:AAEca8NPbe9cF5cHDgd5stDj_64KcbEXfK4";
-const TELEGRAM_CHAT_ID = Deno.env.get("TELEGRAM_CHAT_ID") || ""; // Set your chat ID here or via env var
+const _TELEGRAM_CHAT_ID = Deno.env.get("TELEGRAM_CHAT_ID") || ""; // Legacy - now using subscription system
 
 // --- KV: open once (Deploy auto-provisions; CLI uses local store). ---
 const kv = await Deno.openKv();
@@ -195,18 +195,32 @@ function logBalancesSummary(payload: any) {
 // --- Telegram Bot Helpers ---
 
 /**
+ * Add a subscriber to receive whale alerts
+ */
+async function addSubscriber(chatId: string): Promise<void> {
+  const key = ["telegram", "subscribers", chatId];
+  await kv.set(key, { chat_id: chatId, subscribed_at: nowISO() });
+  console.log(`➕ Added subscriber: ${chatId}`);
+}
+
+/**
+ * Get all subscribers
+ */
+async function getAllSubscribers(): Promise<string[]> {
+  const entries = kv.list<{ chat_id: string }>({ prefix: ["telegram", "subscribers"] });
+  const chatIds: string[] = [];
+  for await (const entry of entries) {
+    chatIds.push(entry.value.chat_id);
+  }
+  return chatIds;
+}
+
+/**
  * Send a message to Telegram using the Bot API
  * @param text - The message text (supports Markdown)
- * @param chatId - Optional chat ID (uses TELEGRAM_CHAT_ID env var by default)
+ * @param chatId - The chat ID to send to
  */
-async function sendTelegramMessage(text: string, chatId?: string): Promise<boolean> {
-  const targetChatId = chatId || TELEGRAM_CHAT_ID;
-  
-  if (!targetChatId) {
-    console.warn("⚠️  Telegram message skipped: TELEGRAM_CHAT_ID not set");
-    return false;
-  }
-  
+async function sendTelegramMessage(text: string, chatId: string): Promise<boolean> {
   const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
   
   try {
@@ -214,7 +228,7 @@ async function sendTelegramMessage(text: string, chatId?: string): Promise<boole
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        chat_id: targetChatId,
+        chat_id: chatId,
         text: text,
         parse_mode: "Markdown",
       }),
@@ -226,11 +240,29 @@ async function sendTelegramMessage(text: string, chatId?: string): Promise<boole
       return false;
     }
     
-    console.log("✅ Telegram message sent successfully");
+    console.log(`✅ Telegram message sent to ${chatId}`);
     return true;
   } catch (error) {
     console.error("❌ Failed to send Telegram message:", error);
     return false;
+  }
+}
+
+/**
+ * Broadcast a message to all subscribers
+ */
+async function broadcastToSubscribers(text: string): Promise<void> {
+  const subscribers = await getAllSubscribers();
+  
+  if (subscribers.length === 0) {
+    console.warn("⚠️  No subscribers to send message to");
+    return;
+  }
+  
+  console.log(`📢 Broadcasting to ${subscribers.length} subscriber(s)`);
+  
+  for (const chatId of subscribers) {
+    await sendTelegramMessage(text, chatId);
   }
 }
 
@@ -284,6 +316,63 @@ Deno.serve(async (req) => {
       JSON.stringify({ ok: true, status: "healthy", timestamp: nowISO() }),
       { status: 200, headers: { "content-type": "application/json; charset=utf-8" } },
     );
+  }
+
+  // ---------- /telegram/webhook ----------
+  if (pathname === "/telegram/webhook" && req.method === "POST") {
+    // deno-lint-ignore no-explicit-any
+    let parsed: any;
+    try {
+      parsed = rawBody ? JSON.parse(rawBody) : undefined;
+    } catch (err) {
+      console.error("JSON parse error:", err);
+      return new Response("Invalid JSON", { status: 400 });
+    }
+
+    // Handle incoming Telegram messages
+    if (parsed?.message) {
+      const chatId = parsed.message.chat.id?.toString();
+      const text = parsed.message.text || "";
+      const username = parsed.message.from?.username || "unknown";
+
+      console.log(`📨 Telegram message from @${username} (${chatId}): ${text}`);
+
+      // Handle /start command - subscribe user
+      if (text.startsWith("/start")) {
+        await addSubscriber(chatId);
+        await sendTelegramMessage(
+          "🐋 *Welcome to Whale Tracker!*\n\n" +
+          "You're now subscribed to whale alerts. You'll receive notifications when large holders move tokens.\n\n" +
+          "Commands:\n" +
+          "/start - Subscribe to alerts\n" +
+          "/status - Check subscription status",
+          chatId
+        );
+      } 
+      // Handle /status command
+      else if (text.startsWith("/status")) {
+        const subscribers = await getAllSubscribers();
+        const isSubscribed = subscribers.includes(chatId);
+        await sendTelegramMessage(
+          isSubscribed 
+            ? "✅ You're subscribed to whale alerts!" 
+            : "❌ You're not subscribed. Send /start to subscribe.",
+          chatId
+        );
+      }
+      // Handle other messages
+      else {
+        await sendTelegramMessage(
+          "Send /start to subscribe to whale alerts!",
+          chatId
+        );
+      }
+    }
+
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "content-type": "application/json; charset=utf-8" },
+    });
   }
 
   // ---------- /activities ----------
@@ -439,9 +528,9 @@ Deno.serve(async (req) => {
         assetSymbols.add(change.asset.symbol);
       }
       
-      // Send Telegram notification for each balance change
+      // Broadcast Telegram notification to all subscribers
       const message = formatBalanceChangeMessage(change);
-      await sendTelegramMessage(message);
+      await broadcastToSubscribers(message);
     }
 
     return new Response(

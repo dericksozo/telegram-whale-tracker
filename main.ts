@@ -226,16 +226,29 @@ Deno.serve(async (req) => {
     const directionCounts: Record<string, number> = { in: 0, out: 0 };
     const assetSymbols = new Set<string>();
     
-    for (const change of changes) {
+    console.log(`\n========== BALANCE CHANGES (${changes.length}) @ ${nowISO()} ==========`);
+    
+    for (const [i, change] of changes.entries()) {
       const dir = change?.direction ?? "unknown";
       directionCounts[dir] = (directionCounts[dir] ?? 0) + 1;
       if (change?.asset?.symbol) {
         assetSymbols.add(change.asset.symbol);
       }
+      
+      console.log(`\n[Balance ${i}]`);
+      console.log(`  Address: ${change?.address}`);
+      console.log(`  Chain: ${change?.chain} (${change?.chain_id})`);
+      console.log(`  Direction: ${change?.direction}`);
+      console.log(`  Amount: ${change?.amount} (raw: ${change?.amount_raw})`);
+      console.log(`  Asset: ${change?.asset?.symbol} (${change?.asset?.name})`);
+      console.log(`  Contract: ${change?.asset?.contract_address}`);
+      console.log(`  Decimals: ${change?.asset?.decimals}`);
+      console.log(`  Block: ${change?.block_number} @ ${change?.block_time}`);
+      console.log(`  Transaction: ${change?.tx_hash}`);
     }
 
     console.log(
-      `Received ${changes.length} balance changes - direction:`,
+      `\nSummary: ${changes.length} balance changes - direction:`,
       directionCounts,
       "assets:",
       Array.from(assetSymbols).join(", ")

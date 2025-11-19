@@ -198,6 +198,59 @@ function logBalancesSummary(payload: any) {
 // --- Sim API Helpers ---
 
 /**
+ * Fetch webhook metadata to get chain_ids
+ * @param webhookId - The webhook UUID
+ * @returns Webhook metadata or null
+ */
+// deno-lint-ignore no-explicit-any
+async function fetchWebhookMetadata(webhookId: string): Promise<any> {
+  // Check cache first
+  const cacheKey = ["webhook", "metadata", webhookId];
+  const cached = await kv.get(cacheKey);
+  if (cached.value) {
+    console.log(`✅ Using cached webhook metadata for ${webhookId}`);
+    return cached.value;
+  }
+  
+  const url = `https://api.sim.dune.com/beta/evm/subscriptions/webhooks/${webhookId}`;
+  console.log(`🔍 Fetching webhook metadata: ${url}`);
+  
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        "X-Sim-Api-Key": SIM_API_KEY,
+      },
+    });
+    
+    if (!response.ok) {
+      console.warn(`⚠️  Failed to fetch webhook metadata: ${response.status}`);
+      return null;
+    }
+    
+    const data = await response.json();
+    console.log(`✅ Webhook chain_ids:`, data.chain_ids);
+    
+    // Cache for 1 hour
+    await kv.set(cacheKey, data, { expireIn: 3600000 });
+    
+    return data;
+  } catch (error) {
+    console.error(`❌ Error fetching webhook metadata:`, error);
+    return null;
+  }
+}
+
+/**
+ * Check if token info response is valid (has symbol and name)
+ */
+// deno-lint-ignore no-explicit-any
+function isValidTokenInfo(tokenInfo: any): boolean {
+  return tokenInfo?.symbol && tokenInfo?.symbol !== null && 
+         tokenInfo?.name && tokenInfo?.name !== null;
+}
+
+/**
  * Fetch token information from Sim API Token Info endpoint
  * @param tokenAddress - The token contract address
  * @param chainId - The chain ID
@@ -227,10 +280,18 @@ async function fetchTokenInfo(tokenAddress: string, chainId: number): Promise<an
     const data = await response.json();
     console.log(`📥 Token Info API response:`, JSON.stringify(data, null, 2));
     
-    // Return the first token from the tokens array
+    // Return the first token from the tokens array if it's valid
     if (data?.tokens && Array.isArray(data.tokens) && data.tokens.length > 0) {
-      console.log(`✅ Fetched token info for ${tokenAddress}: ${data.tokens[0].symbol} on chain ${data.tokens[0].chain_id}`);
-      return data.tokens[0];
+      const tokenInfo = data.tokens[0];
+      
+      // Check if it's a valid response (has symbol and name)
+      if (isValidTokenInfo(tokenInfo)) {
+        console.log(`✅ Fetched valid token info: ${tokenInfo.symbol} (${tokenInfo.name}) on chain ${tokenInfo.chain_id}`);
+        return tokenInfo;
+      } else {
+        console.warn(`⚠️  Token info returned but missing symbol/name (likely wrong chain)`);
+        return null;
+      }
     }
     
     console.warn(`⚠️  Token info API returned no tokens in array`);
@@ -239,6 +300,28 @@ async function fetchTokenInfo(tokenAddress: string, chainId: number): Promise<an
     console.error(`❌ Error fetching token info for ${tokenAddress}:`, error);
     return null;
   }
+}
+
+/**
+ * Fetch token info by trying multiple chains
+ * @param tokenAddress - The token contract address
+ * @param chainIds - Array of chain IDs to try
+ * @returns Token info or null if not found on any chain
+ */
+// deno-lint-ignore no-explicit-any
+async function fetchTokenInfoMultiChain(tokenAddress: string, chainIds: number[]): Promise<any> {
+  console.log(`🔍 Trying to fetch token ${tokenAddress} across ${chainIds.length} chain(s): ${chainIds.join(", ")}`);
+  
+  for (const chainId of chainIds) {
+    const tokenInfo = await fetchTokenInfo(tokenAddress, chainId);
+    if (tokenInfo) {
+      console.log(`✅ Found valid token on chain ${chainId}`);
+      return tokenInfo;
+    }
+  }
+  
+  console.warn(`⚠️  Token ${tokenAddress} not found on any of the subscribed chains`);
+  return null;
 }
 
 // --- Telegram Bot Helpers ---
@@ -570,11 +653,22 @@ Deno.serve(async (req) => {
 
     const changes = parsed.balance_changes;
     const blockNumber = parsed.block_number; // Extract from top-level payload
-    const chainId = parsed.chain_id; // Extract chain_id for token info API (may be undefined)
     
-    // Log if chain_id is missing
-    if (!chainId) {
-      console.warn(`⚠️  No chain_id in top-level payload. Will try to get from individual balance changes.`);
+    // Get webhook ID from headers to fetch chain_ids
+    const webhookId = req.headers.get("dune-webhook-id") || 
+                      req.headers.get("sim-webhook-id") ||
+                      req.headers.get("x-webhook-id") ||
+                      req.headers.get("webhook-id");
+    
+    let webhookChainIds: number[] = [];
+    if (webhookId) {
+      console.log(`📍 Webhook ID found: ${webhookId}`);
+      const webhookMetadata = await fetchWebhookMetadata(webhookId);
+      if (webhookMetadata?.chain_ids && Array.isArray(webhookMetadata.chain_ids)) {
+        webhookChainIds = webhookMetadata.chain_ids;
+      }
+    } else {
+      console.warn(`⚠️  No webhook ID in headers - will use default chain`);
     }
     
     const directionCounts: Record<string, number> = { in: 0, out: 0 };
@@ -591,19 +685,15 @@ Deno.serve(async (req) => {
                           change?.contract_address ||
                           change?.token_address;
       
-      // Get chain_id from the change object, top-level, or use default
-      const changeChainId = change?.chain_id || chainId || DEFAULT_CHAIN_ID;
-      
-      console.log(`📊 Debug - change.chain_id: ${change?.chain_id}, top chainId: ${chainId}, using: ${changeChainId}`);
-      
       // Check if token info is missing and fetch it if needed
       const needsTokenInfo = !change?.asset?.symbol || change?.asset?.symbol === null;
       
-      console.log(`📊 Debug - tokenAddress: ${tokenAddress}, needsTokenInfo: ${needsTokenInfo}, symbol: ${change?.asset?.symbol}`);
-      
-      if (needsTokenInfo && tokenAddress && changeChainId) {
-        console.log(`🔍 Token info missing for ${tokenAddress}, fetching from chain ${changeChainId}`);
-        const tokenInfo = await fetchTokenInfo(tokenAddress, changeChainId);
+      if (needsTokenInfo && tokenAddress) {
+        // Use webhook chain_ids or fallback to default
+        const chainsToTry = webhookChainIds.length > 0 ? webhookChainIds : [DEFAULT_CHAIN_ID];
+        
+        console.log(`🔍 Token info missing for ${tokenAddress}`);
+        const tokenInfo = await fetchTokenInfoMultiChain(tokenAddress, chainsToTry);
         
         if (tokenInfo) {
           // Enrich the change object with fetched token info
@@ -612,14 +702,12 @@ Deno.serve(async (req) => {
           change.asset.name = tokenInfo.name;
           change.asset.decimals = tokenInfo.decimals;
           change.asset.token_address = tokenAddress;
-          console.log(`✅ Enriched with: ${tokenInfo.symbol} (${tokenInfo.name}) - decimals: ${tokenInfo.decimals}`);
+          console.log(`✅ Enriched with: ${tokenInfo.symbol} (${tokenInfo.name}) on chain ${tokenInfo.chain_id}`);
         } else {
-          console.warn(`⚠️  Could not fetch token info for ${tokenAddress} on chain ${changeChainId}`);
+          console.warn(`⚠️  Could not fetch token info for ${tokenAddress} on any chain`);
         }
       } else if (!tokenAddress) {
         console.warn(`⚠️  No token address found in balance change`);
-      } else if (!changeChainId) {
-        console.warn(`⚠️  No chain_id found - cannot fetch token info`);
       } else if (!needsTokenInfo) {
         console.log(`ℹ️  Token info already present: ${change?.asset?.symbol}`);
       }

@@ -62,6 +62,120 @@ async function kvStoreRaw(kind: string, req: Request, rawBody: string) {
   }
 }
 
+// --- Logging helpers ---
+
+// deno-lint-ignore no-explicit-any
+function logActivitiesSummary(payload: any) {
+  const acts = payload?.activities;
+  if (!Array.isArray(acts)) {
+    console.log("No valid 'activities' array found.");
+    return;
+  }
+
+  console.log(`\n========== ACTIVITIES (${acts.length}) @ ${nowISO()} ==========`);
+
+  const counts: Record<string, number> = {};
+  // deno-lint-ignore no-explicit-any
+  acts.forEach((a: any, i: number) => {
+    const t = a?.type ?? "unknown";
+    counts[t] = (counts[t] ?? 0) + 1;
+    console.log(`\n[Activity ${i}]`);
+    console.log(`  Type: ${t}`);
+    console.log(`  Chain: ${a?.chain_id}`);
+    console.log(`  Block: ${a?.block_number}`);
+    console.log(`  Transaction: ${a?.tx_hash}`);
+    console.log(`  Address: ${a?.address}`);
+    console.log(`  From: ${a?.from}`);
+    console.log(`  To: ${a?.to}`);
+  });
+
+  console.log(`\nSummary: ${acts.length} activities - type counts:`, counts);
+}
+
+// deno-lint-ignore no-explicit-any
+function logTransactionsSummary(payload: any) {
+  const txs = payload?.transactions;
+  if (!Array.isArray(txs)) {
+    console.log("No valid 'transactions' array found.");
+    return;
+  }
+
+  console.log(`\n========== TRANSACTIONS (${txs.length}) @ ${nowISO()} ==========`);
+
+  const typeCounts: Record<string, number> = {};
+  const successCounts: Record<string, number> = { true: 0, false: 0 };
+  let logsTotal = 0;
+
+  // deno-lint-ignore no-explicit-any
+  txs.forEach((tx: any, i: number) => {
+    const ttype = tx?.transaction_type ?? "unknown";
+    typeCounts[ttype] = (typeCounts[ttype] ?? 0) + 1;
+    const success = Boolean(tx?.success);
+    successCounts[String(success)] = (successCounts[String(success)] ?? 0) + 1;
+    const logsLen = Array.isArray(tx?.logs) ? tx.logs.length : 0;
+    logsTotal += logsLen;
+
+    console.log(`\n[Transaction ${i}]`);
+    console.log(`  Chain: ${tx?.chain} (${tx?.chain_id})`);
+    console.log(`  Hash: ${tx?.hash}`);
+    console.log(`  Block: ${tx?.block_number} @ ${tx?.block_time}`);
+    console.log(`  From: ${tx?.from}`);
+    console.log(`  To: ${tx?.to}`);
+    console.log(`  Type: ${ttype}`);
+    console.log(`  Success: ${success}`);
+    console.log(`  Value: ${tx?.value}`);
+    console.log(`  Gas Price: ${tx?.gas_price}`);
+    console.log(`  Gas Used: ${tx?.gas_used}`);
+    if (tx?.decoded) {
+      console.log(`  Decoded: ${tx.decoded?.name} (${Array.isArray(tx.decoded?.inputs) ? tx.decoded.inputs.length : 0} inputs)`);
+    }
+    console.log(`  Logs: ${logsLen}`);
+  });
+
+  console.log(`\nSummary: ${txs.length} transactions`);
+  console.log(`  Type counts:`, typeCounts);
+  console.log(`  Success counts:`, successCounts);
+  console.log(`  Total logs: ${logsTotal}`);
+}
+
+// deno-lint-ignore no-explicit-any
+function logBalancesSummary(payload: any) {
+  const changes = payload?.balance_changes;
+  if (!Array.isArray(changes)) {
+    console.log("No valid 'balance_changes' array found.");
+    return;
+  }
+
+  console.log(`\n========== BALANCE CHANGES (${changes.length}) @ ${nowISO()} ==========`);
+
+  const directionCounts: Record<string, number> = { in: 0, out: 0 };
+  const assetSymbols = new Set<string>();
+
+  // deno-lint-ignore no-explicit-any
+  changes.forEach((change: any, i: number) => {
+    const dir = change?.direction ?? "unknown";
+    directionCounts[dir] = (directionCounts[dir] ?? 0) + 1;
+    if (change?.asset?.symbol) {
+      assetSymbols.add(change.asset.symbol);
+    }
+
+    console.log(`\n[Balance ${i}]`);
+    console.log(`  Address: ${change?.address}`);
+    console.log(`  Chain: ${change?.chain} (${change?.chain_id})`);
+    console.log(`  Direction: ${change?.direction}`);
+    console.log(`  Amount: ${change?.amount} (raw: ${change?.amount_raw})`);
+    console.log(`  Asset: ${change?.asset?.symbol} (${change?.asset?.name})`);
+    console.log(`  Contract: ${change?.asset?.contract_address}`);
+    console.log(`  Decimals: ${change?.asset?.decimals}`);
+    console.log(`  Block: ${change?.block_number} @ ${change?.block_time}`);
+    console.log(`  Transaction: ${change?.tx_hash}`);
+  });
+
+  console.log(`\nSummary: ${changes.length} balance changes`);
+  console.log(`  Direction counts:`, directionCounts);
+  console.log(`  Assets:`, Array.from(assetSymbols).join(", "));
+}
+
 Deno.serve(async (req) => {
   const start = performance.now();
   let rawBody = "";
@@ -113,13 +227,13 @@ Deno.serve(async (req) => {
       });
     }
 
+    logActivitiesSummary(parsed);
+
     const counts: Record<string, number> = {};
     for (const a of parsed.activities) {
       const t = a?.type ?? "unknown";
       counts[t] = (counts[t] ?? 0) + 1;
     }
-
-    console.log(`Received ${parsed.activities.length} activities:`, counts);
 
     return new Response(
       JSON.stringify({
@@ -164,6 +278,8 @@ Deno.serve(async (req) => {
       });
     }
 
+    logTransactionsSummary(parsed);
+
     const txs = parsed.transactions;
     const typeCounts: Record<string, number> = {};
     const successCounts: Record<string, number> = { true: 0, false: 0 };
@@ -173,8 +289,6 @@ Deno.serve(async (req) => {
       const success = Boolean(tx?.success);
       successCounts[String(success)] = (successCounts[String(success)] ?? 0) + 1;
     }
-
-    console.log(`Received ${txs.length} transactions - types:`, typeCounts, "success:", successCounts);
 
     // TODO: Process whale transactions and send to Telegram (later step)
 
@@ -222,37 +336,19 @@ Deno.serve(async (req) => {
       });
     }
 
+    logBalancesSummary(parsed);
+
     const changes = parsed.balance_changes;
     const directionCounts: Record<string, number> = { in: 0, out: 0 };
     const assetSymbols = new Set<string>();
     
-    console.log(`\n========== BALANCE CHANGES (${changes.length}) @ ${nowISO()} ==========`);
-    
-    for (const [i, change] of changes.entries()) {
+    for (const change of changes) {
       const dir = change?.direction ?? "unknown";
       directionCounts[dir] = (directionCounts[dir] ?? 0) + 1;
       if (change?.asset?.symbol) {
         assetSymbols.add(change.asset.symbol);
       }
-      
-      console.log(`\n[Balance ${i}]`);
-      console.log(`  Address: ${change?.address}`);
-      console.log(`  Chain: ${change?.chain} (${change?.chain_id})`);
-      console.log(`  Direction: ${change?.direction}`);
-      console.log(`  Amount: ${change?.amount} (raw: ${change?.amount_raw})`);
-      console.log(`  Asset: ${change?.asset?.symbol} (${change?.asset?.name})`);
-      console.log(`  Contract: ${change?.asset?.contract_address}`);
-      console.log(`  Decimals: ${change?.asset?.decimals}`);
-      console.log(`  Block: ${change?.block_number} @ ${change?.block_time}`);
-      console.log(`  Transaction: ${change?.tx_hash}`);
     }
-
-    console.log(
-      `\nSummary: ${changes.length} balance changes - direction:`,
-      directionCounts,
-      "assets:",
-      Array.from(assetSymbols).join(", ")
-    );
 
     // TODO: Process whale balance changes and send to Telegram (later step)
 

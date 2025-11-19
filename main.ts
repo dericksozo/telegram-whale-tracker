@@ -432,6 +432,64 @@ function formatBalanceChangeMessage(change: any, blockNumber?: number): string {
   }
 }
 
+/**
+ * Format an activity into a Telegram message
+ */
+// deno-lint-ignore no-explicit-any
+function formatActivityMessage(activity: any, tokenSymbol?: string, _tokenName?: string): string {
+  const type = activity?.type || "unknown";
+  const value = activity?.value || "0";
+  const symbol = tokenSymbol || "unknown token";
+  const tokenAddress = activity?.token_address || "unknown";
+  const from = activity?.from || activity?.tx_from || "unknown";
+  const to = activity?.to || activity?.tx_to || "unknown";
+  const txHash = activity?.tx_hash || "unknown";
+  const blockNumber = activity?.block_number || "unknown";
+  
+  // Select emoji based on activity type
+  let emoji = "🔔";
+  switch (type) {
+    case "send":
+    case "receive":
+      emoji = "🚨 🚨 🚨";
+      break;
+    case "burn":
+      emoji = "🔥 🔥 🔥";
+      break;
+    case "mint":
+      emoji = "💵 💵 💵";
+      break;
+    case "swap":
+      emoji = "🔄 🔄 🔄";
+      break;
+    case "approve":
+      emoji = "✅ ✅ ✅";
+      break;
+  }
+  
+  // Format message based on activity type
+  let action = "";
+  if (type === "send") {
+    action = `transferred from \`${from}\` to \`${to}\``;
+  } else if (type === "receive") {
+    action = `received by \`${to}\` from \`${from}\``;
+  } else if (type === "burn") {
+    action = `burned at \`${from}\``;
+  } else if (type === "mint") {
+    action = `minted at \`${to}\``;
+  } else if (type === "swap") {
+    action = `swapped by \`${from}\``;
+  } else if (type === "approve") {
+    action = `approved for \`${to}\` by \`${from}\``;
+  } else {
+    action = `${type} from \`${from}\` to \`${to}\``;
+  }
+  
+  return `${emoji}  *${value}* #${symbol} ${action}\n` +
+         `Token: \`${tokenAddress}\`\n` +
+         `Tx: \`${txHash}\` (block ${blockNumber})`;
+}
+
 Deno.serve(async (req) => {
   const start = performance.now();
   let rawBody = "";
@@ -542,16 +600,72 @@ Deno.serve(async (req) => {
 
     logActivitiesSummary(parsed);
 
+    const activities = parsed.activities;
     const counts: Record<string, number> = {};
-    for (const a of parsed.activities) {
-      const t = a?.type ?? "unknown";
+    
+    // Get webhook ID from headers (optional - for multi-chain fallback)
+    const webhookId = req.headers.get("dune-webhook-id") || 
+                      req.headers.get("sim-webhook-id") ||
+                      req.headers.get("x-webhook-id") ||
+                      req.headers.get("webhook-id");
+    
+    let webhookChainIds: number[] = [];
+    if (webhookId) {
+      const webhookMetadata = await fetchWebhookMetadata(webhookId);
+      if (webhookMetadata?.chain_ids && Array.isArray(webhookMetadata.chain_ids)) {
+        webhookChainIds = webhookMetadata.chain_ids;
+      }
+    }
+    
+    for (const activity of activities) {
+      const t = activity?.type ?? "unknown";
       counts[t] = (counts[t] ?? 0) + 1;
+      
+      // Skip non-ERC20 activities or activities without token addresses
+      if (activity?.asset_type !== "erc20" || !activity?.token_address) {
+        console.log(`ℹ️  Skipping activity: ${t} (asset_type: ${activity?.asset_type})`);
+        continue;
+      }
+      
+      const tokenAddress = activity.token_address;
+      const chainId = activity.chain_id; // chain_id is directly in the activity!
+      
+      // Fetch token info if needed (chain_id is right there!)
+      let tokenSymbol = "unknown";
+      let tokenName = "unknown";
+      
+      if (chainId && tokenAddress) {
+        console.log(`🔍 Fetching token info for ${tokenAddress} on chain ${chainId}`);
+        const tokenInfo = await fetchTokenInfo(tokenAddress, chainId);
+        
+        if (tokenInfo && isValidTokenInfo(tokenInfo)) {
+          tokenSymbol = tokenInfo.symbol;
+          tokenName = tokenInfo.name;
+          console.log(`✅ Got token: ${tokenSymbol} (${tokenName})`);
+        } else if (webhookChainIds.length > 0) {
+          // Fallback: try other chains from webhook metadata
+          console.log(`⚠️  Token not found on chain ${chainId}, trying webhook chains`);
+          const otherChains = webhookChainIds.filter(id => id !== chainId);
+          if (otherChains.length > 0) {
+            const fallbackToken = await fetchTokenInfoMultiChain(tokenAddress, otherChains);
+            if (fallbackToken) {
+              tokenSymbol = fallbackToken.symbol;
+              tokenName = fallbackToken.name;
+              console.log(`✅ Found token on different chain: ${tokenSymbol}`);
+            }
+          }
+        }
+      }
+      
+      // Format and broadcast Telegram message
+      const message = formatActivityMessage(activity, tokenSymbol, tokenName);
+      await broadcastToSubscribers(message);
     }
 
     return new Response(
       JSON.stringify({
         ok: true,
-        received: parsed.activities.length,
+        received: activities.length,
         counts,
         received_at: nowISO(),
         duration_ms: Math.round(performance.now() - start),

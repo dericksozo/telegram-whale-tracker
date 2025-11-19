@@ -207,6 +207,8 @@ function logBalancesSummary(payload: any) {
 async function fetchTokenInfo(tokenAddress: string, chainId: number): Promise<any> {
   const url = `https://api.sim.dune.com/v1/evm/token-info/${tokenAddress}?chain_ids=${chainId}`;
   
+  console.log(`🌐 Fetching token info: ${url}`);
+  
   try {
     const response = await fetch(url, {
       method: "GET",
@@ -216,18 +218,22 @@ async function fetchTokenInfo(tokenAddress: string, chainId: number): Promise<an
     });
     
     if (!response.ok) {
+      const errorText = await response.text();
       console.warn(`⚠️  Failed to fetch token info for ${tokenAddress} on chain ${chainId}: ${response.status}`);
+      console.warn(`   Response: ${errorText}`);
       return null;
     }
     
     const data = await response.json();
+    console.log(`📥 Token Info API response:`, JSON.stringify(data, null, 2));
     
     // Return the first token from the tokens array
     if (data?.tokens && Array.isArray(data.tokens) && data.tokens.length > 0) {
-      console.log(`✅ Fetched token info for ${tokenAddress}: ${data.tokens[0].symbol}`);
+      console.log(`✅ Fetched token info for ${tokenAddress}: ${data.tokens[0].symbol} on chain ${data.tokens[0].chain_id}`);
       return data.tokens[0];
     }
     
+    console.warn(`⚠️  Token info API returned no tokens in array`);
     return null;
   } catch (error) {
     console.error(`❌ Error fetching token info for ${tokenAddress}:`, error);
@@ -588,8 +594,14 @@ Deno.serve(async (req) => {
       // Get chain_id from the change object, top-level, or use default
       const changeChainId = change?.chain_id || chainId || DEFAULT_CHAIN_ID;
       
+      console.log(`📊 Debug - change.chain_id: ${change?.chain_id}, top chainId: ${chainId}, using: ${changeChainId}`);
+      
       // Check if token info is missing and fetch it if needed
-      if ((!change?.asset?.symbol || change?.asset?.symbol === null) && tokenAddress && changeChainId) {
+      const needsTokenInfo = !change?.asset?.symbol || change?.asset?.symbol === null;
+      
+      console.log(`📊 Debug - tokenAddress: ${tokenAddress}, needsTokenInfo: ${needsTokenInfo}, symbol: ${change?.asset?.symbol}`);
+      
+      if (needsTokenInfo && tokenAddress && changeChainId) {
         console.log(`🔍 Token info missing for ${tokenAddress}, fetching from chain ${changeChainId}`);
         const tokenInfo = await fetchTokenInfo(tokenAddress, changeChainId);
         
@@ -600,7 +612,7 @@ Deno.serve(async (req) => {
           change.asset.name = tokenInfo.name;
           change.asset.decimals = tokenInfo.decimals;
           change.asset.token_address = tokenAddress;
-          console.log(`✅ Enriched with: ${tokenInfo.symbol} (${tokenInfo.name})`);
+          console.log(`✅ Enriched with: ${tokenInfo.symbol} (${tokenInfo.name}) - decimals: ${tokenInfo.decimals}`);
         } else {
           console.warn(`⚠️  Could not fetch token info for ${tokenAddress} on chain ${changeChainId}`);
         }
@@ -608,6 +620,8 @@ Deno.serve(async (req) => {
         console.warn(`⚠️  No token address found in balance change`);
       } else if (!changeChainId) {
         console.warn(`⚠️  No chain_id found - cannot fetch token info`);
+      } else if (!needsTokenInfo) {
+        console.log(`ℹ️  Token info already present: ${change?.asset?.symbol}`);
       }
       
       if (change?.asset?.symbol) {

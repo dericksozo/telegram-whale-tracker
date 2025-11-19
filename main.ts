@@ -271,30 +271,26 @@ async function broadcastToSubscribers(text: string): Promise<void> {
  */
 // deno-lint-ignore no-explicit-any
 function formatBalanceChangeMessage(change: any): string {
-  const address = change?.address || "unknown";
-  const amount = change?.amount || "0";
+  // Handle different field names from Sim API
+  const address = change?.address || change?.subscribed_address || "unknown";
+  const amount = change?.amount || change?.amount_delta || "0";
   const tokenSymbol = change?.asset?.symbol || "unknown token";
-  const tokenAddress = change?.asset?.contract_address || "unknown";
-  const toAddress = change?.to || "unknown";
-  const txHash = change?.tx_hash || "unknown";
-  const blockNumber = change?.block_number || "unknown";
+  const tokenAddress = change?.asset?.contract_address || change?.asset?.address || "unknown";
+  const toAddress = change?.to || change?.counterparty_address || "";
+  const txHash = change?.tx_hash || change?.transaction_hash || "unknown";
+  const blockNumber = change?.block_number || change?.block || "unknown";
   const direction = change?.direction || "unknown";
   
-  // Truncate addresses for readability
-  const truncateAddr = (addr: string) => {
-    if (!addr || addr === "unknown") return addr;
-    return addr.length > 10 ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : addr;
-  };
-  
-  // Format message based on direction
+  // Format message based on direction (full addresses, no truncation)
   if (direction === "out") {
-    return `🐋 Whale \`${truncateAddr(address)}\` sent *${amount}* ${tokenSymbol} ` +
-           `(token \`${truncateAddr(tokenAddress)}\`) to \`${truncateAddr(toAddress)}\` ` +
-           `in tx \`${truncateAddr(txHash)}\` (block ${blockNumber}).`;
+    const toMsg = toAddress ? ` to \`${toAddress}\`` : "";
+    return `🐋 Whale \`${address}\` sent *${amount}* ${tokenSymbol} ` +
+           `(token \`${tokenAddress}\`)${toMsg} ` +
+           `in tx \`${txHash}\` (block ${blockNumber}).`;
   } else {
-    return `🐋 Whale \`${truncateAddr(address)}\` received *${amount}* ${tokenSymbol} ` +
-           `(token \`${truncateAddr(tokenAddress)}\`) ` +
-           `in tx \`${truncateAddr(txHash)}\` (block ${blockNumber}).`;
+    return `🐋 Whale \`${address}\` received *${amount}* ${tokenSymbol} ` +
+           `(token \`${tokenAddress}\`) ` +
+           `in tx \`${txHash}\` (block ${blockNumber}).`;
   }
 }
 

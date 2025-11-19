@@ -10,8 +10,8 @@
 
 /// <reference lib="deno.unstable" />
 
-// Will be used in later steps for Sim API calls and Telegram
-const _SIM_API_KEY = Deno.env.get("SIM_API_KEY") || "sim_3HEp7EPlougJMPs9GhCOXVjqwyfwIhO0";
+// Sim API Configuration
+const SIM_API_KEY = Deno.env.get("SIM_API_KEY") || "sim_3HEp7EPlougJMPs9GhCOXVjqwyfwIhO0";
 
 // Telegram Bot Configuration
 const TELEGRAM_BOT_TOKEN = Deno.env.get("TELEGRAM_BOT_TOKEN") || "8463582584:AAEca8NPbe9cF5cHDgd5stDj_64KcbEXfK4";
@@ -192,6 +192,46 @@ function logBalancesSummary(payload: any) {
   console.log(`  Assets:`, Array.from(assetSymbols).join(", "));
 }
 
+// --- Sim API Helpers ---
+
+/**
+ * Fetch token information from Sim API Token Info endpoint
+ * @param tokenAddress - The token contract address
+ * @param chainId - The chain ID
+ * @returns Token info or null if not found
+ */
+// deno-lint-ignore no-explicit-any
+async function fetchTokenInfo(tokenAddress: string, chainId: number): Promise<any> {
+  const url = `https://api.sim.dune.com/v1/evm/token-info/${tokenAddress}?chain_ids=${chainId}`;
+  
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        "X-Sim-Api-Key": SIM_API_KEY,
+      },
+    });
+    
+    if (!response.ok) {
+      console.warn(`⚠️  Failed to fetch token info for ${tokenAddress} on chain ${chainId}: ${response.status}`);
+      return null;
+    }
+    
+    const data = await response.json();
+    
+    // Return the first token from the tokens array
+    if (data?.tokens && Array.isArray(data.tokens) && data.tokens.length > 0) {
+      console.log(`✅ Fetched token info for ${tokenAddress}: ${data.tokens[0].symbol}`);
+      return data.tokens[0];
+    }
+    
+    return null;
+  } catch (error) {
+    console.error(`❌ Error fetching token info for ${tokenAddress}:`, error);
+    return null;
+  }
+}
+
 // --- Telegram Bot Helpers ---
 
 /**
@@ -270,7 +310,7 @@ async function broadcastToSubscribers(text: string): Promise<void> {
  * Format a balance change into a Telegram message
  */
 // deno-lint-ignore no-explicit-any
-function formatBalanceChangeMessage(change: any): string {
+function formatBalanceChangeMessage(change: any, blockNumber?: number): string {
   // Handle different field names from Sim API
   const address = change?.address || change?.subscribed_address || "unknown";
   const amount = change?.amount || change?.amount_delta || "0";
@@ -278,7 +318,7 @@ function formatBalanceChangeMessage(change: any): string {
   const tokenAddress = change?.asset?.contract_address || change?.asset?.address || "unknown";
   const toAddress = change?.to || change?.counterparty_address || "";
   const txHash = change?.tx_hash || change?.transaction_hash || "unknown";
-  const blockNumber = change?.block_number || change?.block || "unknown";
+  const block = blockNumber || change?.block_number || change?.block || "unknown";
   const direction = change?.direction || "unknown";
   
   // Format message based on direction (full addresses, no truncation)
@@ -286,11 +326,11 @@ function formatBalanceChangeMessage(change: any): string {
     const toMsg = toAddress ? ` to \`${toAddress}\`` : "";
     return `🐋 Whale \`${address}\` sent *${amount}* ${tokenSymbol} ` +
            `(token \`${tokenAddress}\`)${toMsg} ` +
-           `in tx \`${txHash}\` (block ${blockNumber}).`;
+           `in tx \`${txHash}\` (block ${block}).`;
   } else {
     return `🐋 Whale \`${address}\` received *${amount}* ${tokenSymbol} ` +
            `(token \`${tokenAddress}\`) ` +
-           `in tx \`${txHash}\` (block ${blockNumber}).`;
+           `in tx \`${txHash}\` (block ${block}).`;
   }
 }
 
@@ -514,18 +554,40 @@ Deno.serve(async (req) => {
     logBalancesSummary(parsed);
 
     const changes = parsed.balance_changes;
+    const blockNumber = parsed.block_number; // Extract from top-level payload
+    const chainId = parsed.chain_id; // Extract chain_id for token info API
     const directionCounts: Record<string, number> = { in: 0, out: 0 };
     const assetSymbols = new Set<string>();
     
     for (const change of changes) {
       const dir = change?.direction ?? "unknown";
       directionCounts[dir] = (directionCounts[dir] ?? 0) + 1;
+      
+      // Check if token info is missing and fetch it if needed
+      if (!change?.asset || !change?.asset?.symbol) {
+        const tokenAddress = change?.asset?.contract_address || change?.asset?.address;
+        
+        if (tokenAddress && chainId) {
+          console.log(`🔍 Token info missing, fetching for ${tokenAddress} on chain ${chainId}`);
+          const tokenInfo = await fetchTokenInfo(tokenAddress, chainId);
+          
+          if (tokenInfo) {
+            // Enrich the change object with fetched token info
+            if (!change.asset) change.asset = {};
+            change.asset.symbol = tokenInfo.symbol;
+            change.asset.name = tokenInfo.name;
+            change.asset.decimals = tokenInfo.decimals;
+            change.asset.contract_address = change.asset.contract_address || tokenAddress;
+          }
+        }
+      }
+      
       if (change?.asset?.symbol) {
         assetSymbols.add(change.asset.symbol);
       }
       
-      // Broadcast Telegram notification to all subscribers
-      const message = formatBalanceChangeMessage(change);
+      // Broadcast Telegram notification to all subscribers with block number from payload
+      const message = formatBalanceChangeMessage(change, blockNumber);
       await broadcastToSubscribers(message);
     }
 

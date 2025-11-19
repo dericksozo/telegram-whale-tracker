@@ -6,11 +6,12 @@
 // - GET  /health           (health check)
 // Run: deno task start
 
+// USDC on Ethereum contract address: 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
+
 /// <reference lib="deno.unstable" />
 
 // Will be used in later steps for Sim API calls and Telegram
 const _SIM_API_KEY = Deno.env.get("SIM_API_KEY") || "sim_3HEp7EPlougJMPs9GhCOXVjqwyfwIhO0";
-const WEBHOOK_SECRET = Deno.env.get("WEBHOOK_SECRET") || "dev-secret-123";
 
 // --- KV: open once (Deploy auto-provisions; CLI uses local store). ---
 const kv = await Deno.openKv();
@@ -71,18 +72,7 @@ Deno.serve(async (req) => {
     console.error("Error reading body:", e);
   }
 
-  const { pathname, searchParams } = new URL(req.url);
-
-  // Verify webhook secret for all webhook endpoints
-  const secret = searchParams.get("secret");
-  const isWebhookPath = pathname === "/activities" || pathname === "/transactions" || pathname === "/balances";
-  if (isWebhookPath && req.method === "POST" && secret !== WEBHOOK_SECRET) {
-    console.warn("Unauthorized webhook attempt:", pathname);
-    return new Response(JSON.stringify({ error: "Unauthorized" }), {
-      status: 401,
-      headers: { "content-type": "application/json; charset=utf-8" },
-    });
-  }
+  const { pathname } = new URL(req.url);
 
   // ---------- /health ----------
   if (pathname === "/health" && req.method === "GET") {

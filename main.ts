@@ -13,6 +13,10 @@
 // Will be used in later steps for Sim API calls and Telegram
 const _SIM_API_KEY = Deno.env.get("SIM_API_KEY") || "sim_3HEp7EPlougJMPs9GhCOXVjqwyfwIhO0";
 
+// Telegram Bot Configuration
+const TELEGRAM_BOT_TOKEN = Deno.env.get("TELEGRAM_BOT_TOKEN") || "8463582584:AAEca8NPbe9cF5cHDgd5stDj_64KcbEXfK4";
+const TELEGRAM_CHAT_ID = Deno.env.get("TELEGRAM_CHAT_ID") || ""; // Set your chat ID here or via env var
+
 // --- KV: open once (Deploy auto-provisions; CLI uses local store). ---
 const kv = await Deno.openKv();
 
@@ -188,6 +192,80 @@ function logBalancesSummary(payload: any) {
   console.log(`  Assets:`, Array.from(assetSymbols).join(", "));
 }
 
+// --- Telegram Bot Helpers ---
+
+/**
+ * Send a message to Telegram using the Bot API
+ * @param text - The message text (supports Markdown)
+ * @param chatId - Optional chat ID (uses TELEGRAM_CHAT_ID env var by default)
+ */
+async function sendTelegramMessage(text: string, chatId?: string): Promise<boolean> {
+  const targetChatId = chatId || TELEGRAM_CHAT_ID;
+  
+  if (!targetChatId) {
+    console.warn("⚠️  Telegram message skipped: TELEGRAM_CHAT_ID not set");
+    return false;
+  }
+  
+  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+  
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: targetChatId,
+        text: text,
+        parse_mode: "Markdown",
+      }),
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`❌ Telegram API error (${response.status}):`, errorText);
+      return false;
+    }
+    
+    console.log("✅ Telegram message sent successfully");
+    return true;
+  } catch (error) {
+    console.error("❌ Failed to send Telegram message:", error);
+    return false;
+  }
+}
+
+/**
+ * Format a balance change into a Telegram message
+ */
+// deno-lint-ignore no-explicit-any
+function formatBalanceChangeMessage(change: any): string {
+  const address = change?.address || "unknown";
+  const amount = change?.amount || "0";
+  const tokenSymbol = change?.asset?.symbol || "unknown token";
+  const tokenAddress = change?.asset?.contract_address || "unknown";
+  const toAddress = change?.to || "unknown";
+  const txHash = change?.tx_hash || "unknown";
+  const blockNumber = change?.block_number || "unknown";
+  const direction = change?.direction || "unknown";
+  
+  // Truncate addresses for readability
+  const truncateAddr = (addr: string) => {
+    if (!addr || addr === "unknown") return addr;
+    return addr.length > 10 ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : addr;
+  };
+  
+  // Format message based on direction
+  if (direction === "out") {
+    return `🐋 Whale \`${truncateAddr(address)}\` sent *${amount}* ${tokenSymbol} ` +
+           `(token \`${truncateAddr(tokenAddress)}\`) to \`${truncateAddr(toAddress)}\` ` +
+           `in tx \`${truncateAddr(txHash)}\` (block ${blockNumber}).`;
+  } else {
+    return `🐋 Whale \`${truncateAddr(address)}\` received *${amount}* ${tokenSymbol} ` +
+           `(token \`${truncateAddr(tokenAddress)}\`) ` +
+           `in tx \`${truncateAddr(txHash)}\` (block ${blockNumber}).`;
+  }
+}
+
 Deno.serve(async (req) => {
   const start = performance.now();
   let rawBody = "";
@@ -360,9 +438,11 @@ Deno.serve(async (req) => {
       if (change?.asset?.symbol) {
         assetSymbols.add(change.asset.symbol);
       }
+      
+      // Send Telegram notification for each balance change
+      const message = formatBalanceChangeMessage(change);
+      await sendTelegramMessage(message);
     }
-
-    // TODO: Process whale balance changes and send to Telegram (later step)
 
     return new Response(
       JSON.stringify({

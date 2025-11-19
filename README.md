@@ -17,6 +17,26 @@ A real-time Telegram bot that monitors large cryptocurrency holders ("whales") a
 - Sim API key (get one at [sim.io](https://sim.io))
 - Telegram bot token (create via [@BotFather](https://t.me/botfather))
 
+### Telegram Bot Setup
+
+1. **Create a bot**:
+   - Message [@BotFather](https://t.me/botfather) on Telegram
+   - Send `/newbot` and follow the instructions
+   - Copy the bot token (format: `123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11`)
+
+2. **Get your Chat ID**:
+   - Start a conversation with your new bot
+   - Send any message to the bot
+   - Visit `https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates` in your browser
+   - Find your chat ID in the JSON response (look for `"chat":{"id":123456789...}`)
+   - Alternatively, message [@userinfobot](https://t.me/userinfobot) to get your chat ID
+
+3. **Add the credentials to your `.env` file**:
+   ```
+   TELEGRAM_BOT_TOKEN=your_bot_token_here
+   TELEGRAM_CHAT_ID=your_chat_id_here
+   ```
+
 ### Installation
 
 1. Clone the repository:
@@ -68,7 +88,23 @@ Receives transaction payloads from Sim's Subscriptions API. Stores raw payloads 
 POST /balances?secret=YOUR_WEBHOOK_SECRET
 ```
 
-Receives balance change payloads from Sim's Subscriptions API. Stores raw payloads in Deno KV and logs balance change direction counts and asset information.
+Receives balance change payloads from Sim's Subscriptions API. Stores raw payloads in Deno KV and logs balance change direction counts and asset information. **Also sends formatted Telegram messages for each balance change.**
+
+### Telegram Message Format
+
+When a balance change is detected, the bot sends a formatted message like:
+
+```
+🐋 Whale 0x014b… sent 1,000,000 USDC (token 0x3f39…) to 0xcf93… in tx 0x3214… (block 33880076).
+```
+
+The message includes:
+- 🐋 Whale emoji indicator
+- Truncated addresses for readability
+- Token amount and symbol
+- Transaction hash (truncated)
+- Block number
+- Markdown formatting for better visibility
 
 ## Development Roadmap
 
@@ -76,8 +112,8 @@ Receives balance change payloads from Sim's Subscriptions API. Stores raw payloa
 - [ ] Step 2: Data collection with Dune (identify popular tokens)
 - [ ] Step 3: Whale identification with Token Holders API
 - [ ] Step 4: Subscription setup with Subscriptions API
-- [ ] Step 5: Telegram bot integration
-- [ ] Step 6: Message processing and formatting
+- [x] Step 5: Telegram bot integration
+- [x] Step 6: Message processing and formatting
 - [ ] Step 7: Deployment
 
 ## Testing
@@ -147,6 +183,8 @@ curl -X POST "http://localhost:8000/balances?secret=dev-secret-123" \
 - **Comprehensive Logging**: Detailed request/response logging with transaction breakdowns
 - **Security**: URL secret-based authentication for webhook endpoints
 - **Fast Response**: Responds quickly to avoid webhook retry behavior
+- **Telegram Integration**: Sends real-time formatted alerts to Telegram for balance changes
+- **Markdown Formatting**: Beautiful, readable messages with emoji indicators and truncated addresses
 
 ## License
 

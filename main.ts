@@ -17,6 +17,9 @@ const SIM_API_KEY = Deno.env.get("SIM_API_KEY") || "sim_3HEp7EPlougJMPs9GhCOXVjq
 const TELEGRAM_BOT_TOKEN = Deno.env.get("TELEGRAM_BOT_TOKEN") || "8463582584:AAEca8NPbe9cF5cHDgd5stDj_64KcbEXfK4";
 const _TELEGRAM_CHAT_ID = Deno.env.get("TELEGRAM_CHAT_ID") || ""; // Legacy - now using subscription system
 
+// Default chain ID if not provided in webhook (1 = Ethereum Mainnet)
+const DEFAULT_CHAIN_ID = parseInt(Deno.env.get("DEFAULT_CHAIN_ID") || "1");
+
 // --- KV: open once (Deploy auto-provisions; CLI uses local store). ---
 const kv = await Deno.openKv();
 
@@ -312,12 +315,18 @@ async function broadcastToSubscribers(text: string): Promise<void> {
 // deno-lint-ignore no-explicit-any
 function formatBalanceChangeMessage(change: any, blockNumber?: number): string {
   // Handle different field names from Sim API
-  const address = change?.address || change?.subscribed_address || "unknown";
-  const amount = change?.amount || change?.amount_delta || "0";
+  const address = change?.subscribed_address || change?.address || "unknown";
+  const amount = change?.amount_delta || change?.amount || "0";
   const tokenSymbol = change?.asset?.symbol || "unknown token";
-  const tokenAddress = change?.asset?.contract_address || change?.asset?.address || "unknown";
-  const toAddress = change?.to || change?.counterparty_address || "";
-  const txHash = change?.tx_hash || change?.transaction_hash || "unknown";
+  
+  // Token address - prioritize asset.token_address per Sim API structure
+  const tokenAddress = change?.asset?.token_address || 
+                      change?.asset?.contract_address || 
+                      change?.asset?.address || 
+                      "unknown";
+  
+  const toAddress = change?.counterparty_address || change?.to || "";
+  const txHash = change?.transaction_hash || change?.tx_hash || "unknown";
   const block = blockNumber || change?.block_number || change?.block || "unknown";
   const direction = change?.direction || "unknown";
   
@@ -555,7 +564,13 @@ Deno.serve(async (req) => {
 
     const changes = parsed.balance_changes;
     const blockNumber = parsed.block_number; // Extract from top-level payload
-    const chainId = parsed.chain_id; // Extract chain_id for token info API
+    const chainId = parsed.chain_id; // Extract chain_id for token info API (may be undefined)
+    
+    // Log if chain_id is missing
+    if (!chainId) {
+      console.warn(`⚠️  No chain_id in top-level payload. Will try to get from individual balance changes.`);
+    }
+    
     const directionCounts: Record<string, number> = { in: 0, out: 0 };
     const assetSymbols = new Set<string>();
     
@@ -563,23 +578,36 @@ Deno.serve(async (req) => {
       const dir = change?.direction ?? "unknown";
       directionCounts[dir] = (directionCounts[dir] ?? 0) + 1;
       
+      // Extract token address - it's in asset.token_address per the Sim API structure
+      const tokenAddress = change?.asset?.token_address || 
+                          change?.asset?.contract_address || 
+                          change?.asset?.address || 
+                          change?.contract_address ||
+                          change?.token_address;
+      
+      // Get chain_id from the change object, top-level, or use default
+      const changeChainId = change?.chain_id || chainId || DEFAULT_CHAIN_ID;
+      
       // Check if token info is missing and fetch it if needed
-      if (!change?.asset || !change?.asset?.symbol) {
-        const tokenAddress = change?.asset?.contract_address || change?.asset?.address;
+      if ((!change?.asset?.symbol || change?.asset?.symbol === null) && tokenAddress && changeChainId) {
+        console.log(`🔍 Token info missing for ${tokenAddress}, fetching from chain ${changeChainId}`);
+        const tokenInfo = await fetchTokenInfo(tokenAddress, changeChainId);
         
-        if (tokenAddress && chainId) {
-          console.log(`🔍 Token info missing, fetching for ${tokenAddress} on chain ${chainId}`);
-          const tokenInfo = await fetchTokenInfo(tokenAddress, chainId);
-          
-          if (tokenInfo) {
-            // Enrich the change object with fetched token info
-            if (!change.asset) change.asset = {};
-            change.asset.symbol = tokenInfo.symbol;
-            change.asset.name = tokenInfo.name;
-            change.asset.decimals = tokenInfo.decimals;
-            change.asset.contract_address = change.asset.contract_address || tokenAddress;
-          }
+        if (tokenInfo) {
+          // Enrich the change object with fetched token info
+          if (!change.asset) change.asset = {};
+          change.asset.symbol = tokenInfo.symbol;
+          change.asset.name = tokenInfo.name;
+          change.asset.decimals = tokenInfo.decimals;
+          change.asset.token_address = tokenAddress;
+          console.log(`✅ Enriched with: ${tokenInfo.symbol} (${tokenInfo.name})`);
+        } else {
+          console.warn(`⚠️  Could not fetch token info for ${tokenAddress} on chain ${changeChainId}`);
         }
+      } else if (!tokenAddress) {
+        console.warn(`⚠️  No token address found in balance change`);
+      } else if (!changeChainId) {
+        console.warn(`⚠️  No chain_id found - cannot fetch token info`);
       }
       
       if (change?.asset?.symbol) {

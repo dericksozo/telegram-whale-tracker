@@ -66,6 +66,10 @@ async function kvStoreRaw(kind: string, req: Request, rawBody: string) {
 
 // deno-lint-ignore no-explicit-any
 function logActivitiesSummary(payload: any) {
+  console.log("\n========== RAW ACTIVITIES PAYLOAD ==========");
+  console.log(JSON.stringify(payload, null, 2));
+  console.log("============================================\n");
+
   const acts = payload?.activities;
   if (!Array.isArray(acts)) {
     console.log("No valid 'activities' array found.");
@@ -94,6 +98,10 @@ function logActivitiesSummary(payload: any) {
 
 // deno-lint-ignore no-explicit-any
 function logTransactionsSummary(payload: any) {
+  console.log("\n========== RAW TRANSACTIONS PAYLOAD ==========");
+  console.log(JSON.stringify(payload, null, 2));
+  console.log("==============================================\n");
+
   const txs = payload?.transactions;
   if (!Array.isArray(txs)) {
     console.log("No valid 'transactions' array found.");
@@ -140,6 +148,10 @@ function logTransactionsSummary(payload: any) {
 
 // deno-lint-ignore no-explicit-any
 function logBalancesSummary(payload: any) {
+  console.log("\n========== RAW BALANCE PAYLOAD ==========");
+  console.log(JSON.stringify(payload, null, 2));
+  console.log("=========================================\n");
+
   const changes = payload?.balance_changes;
   if (!Array.isArray(changes)) {
     console.log("No valid 'balance_changes' array found.");

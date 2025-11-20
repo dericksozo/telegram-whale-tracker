@@ -617,9 +617,42 @@ Deno.serve(async (req) => {
       }
     }
     
+    // Build transaction hash map for deduplication
+    // deno-lint-ignore no-explicit-any
+    const txHashMap = new Map<string, any[]>();
+    // deno-lint-ignore no-explicit-any
+    activities.forEach((activity: any) => {
+      const txHash = activity?.tx_hash;
+      if (txHash) {
+        if (!txHashMap.has(txHash)) {
+          txHashMap.set(txHash, []);
+        }
+        txHashMap.get(txHash)!.push(activity);
+      }
+    });
+    
     for (const activity of activities) {
       const t = activity?.type ?? "unknown";
       counts[t] = (counts[t] ?? 0) + 1;
+      
+      // Filter: Only track send, swap, mint, burn
+      if (!["send", "swap", "mint", "burn"].includes(t)) {
+        console.log(`ℹ️  Skipping activity type: ${t}`);
+        continue;
+      }
+      
+      // Deduplicate: Skip 'receive' if same tx has 'send' (whale-to-whale transfers)
+      if (t === "receive") {
+        const txHash = activity?.tx_hash;
+        const txActivities = txHashMap.get(txHash) || [];
+        // deno-lint-ignore no-explicit-any
+        const hasSend = txActivities.some((a: any) => a.type === "send");
+        
+        if (hasSend) {
+          console.log(`ℹ️  Skipping duplicate 'receive' for tx ${txHash} (already have 'send')`);
+          continue;
+        }
+      }
       
       // Skip non-ERC20 activities or activities without token addresses
       if (activity?.asset_type !== "erc20" || !activity?.token_address) {

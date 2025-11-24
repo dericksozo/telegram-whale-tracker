@@ -520,9 +520,21 @@ function formatActivityMessage(
   let emoji = "🔔";
   switch (type) {
     case "send":
-    case "receive":
-      emoji = "🚨 🚨 🚨 🚨 🚨 🚨 🚨 🚨 🚨";
+    case "receive": {
+      // Scale emoji count based on USD value (1-9)
+      const usdValue = (tokenPrice && tokenPrice > 0) ? actualAmount * tokenPrice : 0;
+      let emojiCount = 1; // default
+      if (usdValue >= 500_000_000) emojiCount = 9;       // $500M+
+      else if (usdValue >= 100_000_000) emojiCount = 8;  // $100M+
+      else if (usdValue >= 50_000_000) emojiCount = 7;   // $50M+
+      else if (usdValue >= 10_000_000) emojiCount = 6;   // $10M+
+      else if (usdValue >= 5_000_000) emojiCount = 5;    // $5M+
+      else if (usdValue >= 1_000_000) emojiCount = 4;    // $1M+
+      else if (usdValue >= 500_000) emojiCount = 3;      // $500k+
+      else if (usdValue >= 100_000) emojiCount = 2;      // $100k+
+      emoji = "🚨".repeat(emojiCount).split("").join(" ");
       break;
+    }
     case "burn":
       emoji = "🔥 🔥 🔥 🔥";
       break;

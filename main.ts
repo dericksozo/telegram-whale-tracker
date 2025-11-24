@@ -394,6 +394,7 @@ async function sendTelegramMessage(text: string, chatId: string): Promise<boolea
         chat_id: chatId,
         text: text,
         parse_mode: "Markdown",
+        disable_web_page_preview: true,
       }),
     });
     

@@ -421,6 +421,7 @@ function sanitizeForTelegram(text: string): string {
   // Remove control characters (except newlines, carriage returns, tabs)
   // but KEEP emojis and other valid Unicode characters
   // Control characters are U+0000 to U+001F and U+007F to U+009F
+  // deno-lint-ignore no-control-regex
   text = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, '');
   
   return text;
@@ -603,20 +604,20 @@ function formatActivityMessage(
       else if (usdValue >= 1_000_000) emojiCount = 4;    // $1M+
       else if (usdValue >= 500_000) emojiCount = 3;      // $500k+
       else if (usdValue >= 100_000) emojiCount = 2;      // $100k+
-      emoji = "🚨".repeat(emojiCount).split("").join(" ");
+      emoji = "🚨 ".repeat(emojiCount).trim();
       break;
     }
     case "burn":
-      emoji = "🔥 🔥 🔥 🔥";
+      emoji = "🔥 ".repeat(4).trim();
       break;
     case "mint":
-      emoji = "💵 💵 💵 💵";
+      emoji = "💵 ".repeat(4).trim();
       break;
     case "swap":
-      emoji = "🔄 🔄 🔄";
+      emoji = "🔄 ".repeat(3).trim();
       break;
     case "approve":
-      emoji = "✅ ✅ ✅";
+      emoji = "✅ ".repeat(3).trim();
       break;
   }
   

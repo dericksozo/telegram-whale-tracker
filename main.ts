@@ -528,7 +528,7 @@ function formatActivityMessage(
     message = `${emoji}  ${formattedAmount} #${symbol}${usdString} ${type} from ${from} to ${to}`;
   }
   
-  message += `\nDetails (${detailsLink})`;
+  message += `\n\n[Tx Link](${detailsLink})`;
   
   return message;
 }

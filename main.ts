@@ -27,6 +27,37 @@ function nowISO() {
   return new Date().toISOString();
 }
 
+/**
+ * Format number with commas for readability
+ * Uses built-in Intl.NumberFormat for proper locale formatting
+ */
+function formatNumber(value: string | number): string {
+  const num = typeof value === 'string' ? parseFloat(value) : value;
+  if (isNaN(num)) return '0';
+  return new Intl.NumberFormat('en-US', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 2
+  }).format(num);
+}
+
+/**
+ * Generate blockchain explorer link based on chain ID
+ */
+function getExplorerLink(txHash: string, chainId: number): string {
+  const explorers: Record<number, string> = {
+    1: "https://etherscan.io/tx/",
+    10: "https://optimistic.etherscan.io/tx/",
+    56: "https://bscscan.com/tx/",
+    137: "https://polygonscan.com/tx/",
+    8453: "https://basescan.org/tx/",
+    42161: "https://arbiscan.io/tx/",
+    43114: "https://snowtrace.io/tx/",
+  };
+  
+  const baseUrl = explorers[chainId] || "https://etherscan.io/tx/";
+  return `${baseUrl}${txHash}`;
+}
+
 // --- KV helpers ---
 
 async function sha256Hex(data: string) {
@@ -433,31 +464,44 @@ function formatBalanceChangeMessage(change: any, blockNumber?: number): string {
 }
 
 /**
- * Format an activity into a Telegram message
+ * Format an activity into a Telegram message (Whale Alert style)
  */
-// deno-lint-ignore no-explicit-any
-function formatActivityMessage(activity: any, tokenSymbol?: string, _tokenName?: string): string {
+function formatActivityMessage(
+  // deno-lint-ignore no-explicit-any
+  activity: any, 
+  tokenSymbol: string, 
+  _tokenName: string,
+  tokenPrice: number | null,
+  chainId: number
+): string {
   const type = activity?.type || "unknown";
   const value = activity?.value || "0";
+  const formattedAmount = formatNumber(value);
   const symbol = tokenSymbol || "unknown token";
-  const tokenAddress = activity?.token_address || "unknown";
-  const from = activity?.from || activity?.tx_from || "unknown";
-  const to = activity?.to || activity?.tx_to || "unknown";
   const txHash = activity?.tx_hash || "unknown";
-  const blockNumber = activity?.block_number || "unknown";
   
-  // Select emoji based on activity type
+  // Calculate USD value
+  let usdString = "";
+  if (tokenPrice && tokenPrice > 0) {
+    const usdValue = parseFloat(value) * tokenPrice;
+    usdString = ` (${formatNumber(usdValue)} USD)`;
+  }
+  
+  // Generate explorer link
+  const detailsLink = getExplorerLink(txHash, chainId);
+  
+  // Select emoji based on activity type (more emphatic like Whale Alert)
   let emoji = "🔔";
   switch (type) {
     case "send":
     case "receive":
-      emoji = "🚨 🚨 🚨";
+      emoji = "🚨 🚨 🚨 🚨 🚨 🚨 🚨 🚨 🚨";
       break;
     case "burn":
-      emoji = "🔥 🔥 🔥";
+      emoji = "🔥 🔥 🔥 🔥";
       break;
     case "mint":
-      emoji = "💵 💵 💵";
+      emoji = "💵 💵 💵 💵";
       break;
     case "swap":
       emoji = "🔄 🔄 🔄";
@@ -468,26 +512,25 @@ function formatActivityMessage(activity: any, tokenSymbol?: string, _tokenName?:
   }
   
   // Format message based on activity type
-  let action = "";
-  if (type === "send") {
-    action = `transferred from \`${from}\` to \`${to}\``;
-  } else if (type === "receive") {
-    action = `received by \`${to}\` from \`${from}\``;
+  let message = "";
+  const from = activity?.from || activity?.tx_from || "unknown wallet";
+  const to = activity?.to || activity?.tx_to || "unknown wallet";
+  
+  if (type === "mint") {
+    message = `${emoji}  ${formattedAmount} #${symbol}${usdString} minted at ${to}`;
   } else if (type === "burn") {
-    action = `burned at \`${from}\``;
-  } else if (type === "mint") {
-    action = `minted at \`${to}\``;
+    message = `${emoji}  ${formattedAmount} #${symbol}${usdString} burned at ${from}`;
+  } else if (type === "send" || type === "receive") {
+    message = `${emoji}  ${formattedAmount} #${symbol}${usdString} transferred from ${from} to ${to}`;
   } else if (type === "swap") {
-    action = `swapped by \`${from}\``;
-  } else if (type === "approve") {
-    action = `approved for \`${to}\` by \`${from}\``;
+    message = `${emoji}  ${formattedAmount} #${symbol}${usdString} swapped by ${from}`;
   } else {
-    action = `${type} from \`${from}\` to \`${to}\``;
+    message = `${emoji}  ${formattedAmount} #${symbol}${usdString} ${type} from ${from} to ${to}`;
   }
   
-  return `${emoji}  *${value}* #${symbol} ${action}\n` +
-         `Token: \`${tokenAddress}\`\n` +
-         `Tx: \`${txHash}\` (block ${blockNumber})`;
+  message += `\nDetails (${detailsLink})`;
+  
+  return message;
 }
 
 Deno.serve(async (req) => {
@@ -661,11 +704,12 @@ Deno.serve(async (req) => {
       }
       
       const tokenAddress = activity.token_address;
-      const chainId = activity.chain_id; // chain_id is directly in the activity!
+      const chainId = activity.chain_id || DEFAULT_CHAIN_ID;
       
-      // Fetch token info if needed (chain_id is right there!)
+      // Always fetch token info to get pricing data
       let tokenSymbol = "unknown";
       let tokenName = "unknown";
+      let tokenPrice: number | null = null;
       
       if (chainId && tokenAddress) {
         console.log(`🔍 Fetching token info for ${tokenAddress} on chain ${chainId}`);
@@ -674,7 +718,9 @@ Deno.serve(async (req) => {
         if (tokenInfo && isValidTokenInfo(tokenInfo)) {
           tokenSymbol = tokenInfo.symbol;
           tokenName = tokenInfo.name;
-          console.log(`✅ Got token: ${tokenSymbol} (${tokenName})`);
+          // Extract price from token info (check common price field names)
+          tokenPrice = tokenInfo.price_usd || tokenInfo.price || tokenInfo.priceUsd || null;
+          console.log(`✅ Got token: ${tokenSymbol} (${tokenName}) - Price: $${tokenPrice || 'N/A'}`);
         } else if (webhookChainIds.length > 0) {
           // Fallback: try other chains from webhook metadata
           console.log(`⚠️  Token not found on chain ${chainId}, trying webhook chains`);
@@ -684,14 +730,15 @@ Deno.serve(async (req) => {
             if (fallbackToken) {
               tokenSymbol = fallbackToken.symbol;
               tokenName = fallbackToken.name;
-              console.log(`✅ Found token on different chain: ${tokenSymbol}`);
+              tokenPrice = fallbackToken.price_usd || fallbackToken.price || fallbackToken.priceUsd || null;
+              console.log(`✅ Found token on different chain: ${tokenSymbol} - Price: $${tokenPrice || 'N/A'}`);
             }
           }
         }
       }
       
-      // Format and broadcast Telegram message
-      const message = formatActivityMessage(activity, tokenSymbol, tokenName);
+      // Format and broadcast Telegram message with price and chain info
+      const message = formatActivityMessage(activity, tokenSymbol, tokenName, tokenPrice, chainId);
       await broadcastToSubscribers(message);
     }
 

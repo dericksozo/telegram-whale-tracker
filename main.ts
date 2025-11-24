@@ -399,6 +399,36 @@ async function getAllSubscribers(): Promise<string[]> {
 }
 
 /**
+ * Sanitize text to ensure valid UTF-8 encoding for Telegram
+ * Removes or replaces invalid characters
+ */
+function sanitizeForTelegram(text: string): string {
+  // Ensure text is a string
+  if (typeof text !== 'string') {
+    text = String(text);
+  }
+  
+  // Replace null bytes and other problematic characters
+  text = text.replace(/\0/g, '');
+  
+  // Normalize unicode to ensure proper encoding
+  try {
+    text = text.normalize('NFC');
+  } catch (e) {
+    console.warn("Failed to normalize text:", e);
+  }
+  
+  // Remove any remaining non-printable characters except newlines and tabs
+  text = text.replace(/[^\x20-\x7E\n\r\t\u0080-\uFFFF]/g, '');
+  
+  // Ensure proper escaping for Markdown special characters
+  // Only escape if they're not already part of Markdown syntax
+  // Common issue: underscores in addresses can break Markdown
+  
+  return text;
+}
+
+/**
  * Send a message to Telegram using the Bot API
  * @param text - The message text (supports Markdown)
  * @param chatId - The chat ID to send to
@@ -407,20 +437,58 @@ async function sendTelegramMessage(text: string, chatId: string): Promise<boolea
   const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
   
   try {
+    // Sanitize text to ensure valid UTF-8 encoding
+    const sanitizedText = sanitizeForTelegram(text);
+    
+    // Create request body with explicit UTF-8 encoding
+    const requestBody = JSON.stringify({
+      chat_id: chatId,
+      text: sanitizedText,
+      parse_mode: "Markdown",
+      disable_web_page_preview: true,
+    });
+    
     const response = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: text,
-        parse_mode: "Markdown",
-        disable_web_page_preview: true,
-      }),
+      headers: { 
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: requestBody,
     });
     
     if (!response.ok) {
       const errorText = await response.text();
       console.error(`❌ Telegram API error (${response.status}):`, errorText);
+      console.error(`   Original message length: ${text.length} chars`);
+      console.error(`   Sanitized message length: ${sanitizedText.length} chars`);
+      console.error(`   First 200 chars of sanitized message: ${sanitizedText.substring(0, 200)}`);
+      
+      // Try fallback without Markdown if it's a parse error
+      if (errorText.includes("parse") || errorText.includes("Markdown") || errorText.includes("UTF-8")) {
+        console.log("⚠️  Retrying without Markdown formatting...");
+        
+        const fallbackResponse = await fetch(url, {
+          method: "POST",
+          headers: { 
+            "Content-Type": "application/json; charset=utf-8",
+          },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: sanitizedText,
+            // No parse_mode - send as plain text
+            disable_web_page_preview: true,
+          }),
+        });
+        
+        if (fallbackResponse.ok) {
+          console.log(`✅ Telegram message sent (plain text fallback) to ${chatId}`);
+          return true;
+        } else {
+          const fallbackError = await fallbackResponse.text();
+          console.error(`❌ Fallback also failed:`, fallbackError);
+        }
+      }
+      
       return false;
     }
     

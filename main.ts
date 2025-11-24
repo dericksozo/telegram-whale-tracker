@@ -400,7 +400,7 @@ async function getAllSubscribers(): Promise<string[]> {
 
 /**
  * Sanitize text to ensure valid UTF-8 encoding for Telegram
- * Removes or replaces invalid characters
+ * Removes or replaces invalid characters while preserving emojis
  */
 function sanitizeForTelegram(text: string): string {
   // Ensure text is a string
@@ -408,22 +408,20 @@ function sanitizeForTelegram(text: string): string {
     text = String(text);
   }
   
-  // Replace null bytes and other problematic characters
+  // Replace null bytes which are never valid
   text = text.replace(/\0/g, '');
   
-  // Normalize unicode to ensure proper encoding
+  // Normalize unicode to ensure proper encoding (NFC = Canonical Composition)
   try {
     text = text.normalize('NFC');
   } catch (e) {
     console.warn("Failed to normalize text:", e);
   }
   
-  // Remove any remaining non-printable characters except newlines and tabs
-  text = text.replace(/[^\x20-\x7E\n\r\t\u0080-\uFFFF]/g, '');
-  
-  // Ensure proper escaping for Markdown special characters
-  // Only escape if they're not already part of Markdown syntax
-  // Common issue: underscores in addresses can break Markdown
+  // Remove control characters (except newlines, carriage returns, tabs)
+  // but KEEP emojis and other valid Unicode characters
+  // Control characters are U+0000 to U+001F and U+007F to U+009F
+  text = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, '');
   
   return text;
 }
@@ -441,12 +439,17 @@ async function sendTelegramMessage(text: string, chatId: string): Promise<boolea
     const sanitizedText = sanitizeForTelegram(text);
     
     // Create request body with explicit UTF-8 encoding
-    const requestBody = JSON.stringify({
+    const telegramPayload = {
       chat_id: chatId,
       text: sanitizedText,
       parse_mode: "Markdown",
       disable_web_page_preview: true,
-    });
+    };
+    
+    // Log payload before sending
+    console.log("📤 Sending to Telegram:", telegramPayload);
+    
+    const requestBody = JSON.stringify(telegramPayload);
     
     const response = await fetch(url, {
       method: "POST",

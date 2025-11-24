@@ -52,10 +52,30 @@ function getExplorerLink(txHash: string, chainId: number): string {
     8453: "https://basescan.org/tx/",
     42161: "https://arbiscan.io/tx/",
     43114: "https://snowtrace.io/tx/",
+    84532: "https://sepolia.basescan.org/tx/",
   };
   
   const baseUrl = explorers[chainId] || "https://etherscan.io/tx/";
   return `${baseUrl}${txHash}`;
+}
+
+/**
+ * Generate blockchain explorer address link based on chain ID
+ */
+function getAddressExplorerLink(address: string, chainId: number): string {
+  const explorers: Record<number, string> = {
+    1: "https://etherscan.io/address/",
+    10: "https://optimistic.etherscan.io/address/",
+    56: "https://bscscan.com/address/",
+    137: "https://polygonscan.com/address/",
+    8453: "https://basescan.org/address/",
+    42161: "https://arbiscan.io/address/",
+    43114: "https://snowtrace.io/address/",
+    84532: "https://sepolia.basescan.org/address/",
+  };
+  
+  const baseUrl = explorers[chainId] || "https://etherscan.io/address/";
+  return `${baseUrl}${address}`;
 }
 
 // --- KV helpers ---
@@ -473,19 +493,24 @@ function formatActivityMessage(
   tokenSymbol: string, 
   _tokenName: string,
   tokenPrice: number | null,
+  tokenDecimals: number,
   chainId: number
 ): string {
   const type = activity?.type || "unknown";
-  const value = activity?.value || "0";
-  const formattedAmount = formatNumber(value);
+  const rawValue = activity?.value || "0";
+  
+  // Adjust for decimals
+  const actualAmount = parseFloat(rawValue) / Math.pow(10, tokenDecimals);
+  const formattedAmount = formatNumber(actualAmount);
+  
   const symbol = tokenSymbol || "unknown token";
   const txHash = activity?.tx_hash || "unknown";
   
-  // Calculate USD value
+  // Calculate USD value using the actual amount
   let usdString = "";
   if (tokenPrice && tokenPrice > 0) {
-    const usdValue = parseFloat(value) * tokenPrice;
-    usdString = ` (${formatNumber(usdValue)} USD)`;
+    const usdValue = actualAmount * tokenPrice;
+    usdString = ` ($${formatNumber(usdValue)})`;
   }
   
   // Generate explorer link
@@ -517,16 +542,20 @@ function formatActivityMessage(
   const from = activity?.from || activity?.tx_from || "unknown wallet";
   const to = activity?.to || activity?.tx_to || "unknown wallet";
   
+  // Create markdown links for addresses
+  const fromLink = from !== "unknown wallet" ? `[${from}](${getAddressExplorerLink(from, chainId)})` : from;
+  const toLink = to !== "unknown wallet" ? `[${to}](${getAddressExplorerLink(to, chainId)})` : to;
+  
   if (type === "mint") {
-    message = `${emoji}  ${formattedAmount} #${symbol}${usdString} minted at ${to}`;
+    message = `${emoji}  ${formattedAmount} #${symbol}${usdString} minted at ${toLink}`;
   } else if (type === "burn") {
-    message = `${emoji}  ${formattedAmount} #${symbol}${usdString} burned at ${from}`;
+    message = `${emoji}  ${formattedAmount} #${symbol}${usdString} burned at ${fromLink}`;
   } else if (type === "send" || type === "receive") {
-    message = `${emoji}  ${formattedAmount} #${symbol}${usdString} transferred from ${from} to ${to}`;
+    message = `${emoji}  ${formattedAmount} #${symbol}${usdString} transferred from ${fromLink} to ${toLink}`;
   } else if (type === "swap") {
-    message = `${emoji}  ${formattedAmount} #${symbol}${usdString} swapped by ${from}`;
+    message = `${emoji}  ${formattedAmount} #${symbol}${usdString} swapped by ${fromLink}`;
   } else {
-    message = `${emoji}  ${formattedAmount} #${symbol}${usdString} ${type} from ${from} to ${to}`;
+    message = `${emoji}  ${formattedAmount} #${symbol}${usdString} ${type} from ${fromLink} to ${toLink}`;
   }
   
   message += `\n\n[Tx Link](${detailsLink})`;
@@ -711,6 +740,7 @@ Deno.serve(async (req) => {
       let tokenSymbol = "unknown";
       let tokenName = "unknown";
       let tokenPrice: number | null = null;
+      let tokenDecimals = 18; // default for most ERC20 tokens
       
       if (chainId && tokenAddress) {
         console.log(`🔍 Fetching token info for ${tokenAddress} on chain ${chainId}`);
@@ -719,9 +749,10 @@ Deno.serve(async (req) => {
         if (tokenInfo && isValidTokenInfo(tokenInfo)) {
           tokenSymbol = tokenInfo.symbol;
           tokenName = tokenInfo.name;
+          tokenDecimals = tokenInfo.decimals || 18;
           // Extract price from token info (check common price field names)
           tokenPrice = tokenInfo.price_usd || tokenInfo.price || tokenInfo.priceUsd || null;
-          console.log(`✅ Got token: ${tokenSymbol} (${tokenName}) - Price: $${tokenPrice || 'N/A'}`);
+          console.log(`✅ Got token: ${tokenSymbol} (${tokenName}) - Decimals: ${tokenDecimals} - Price: $${tokenPrice || 'N/A'}`);
         } else if (webhookChainIds.length > 0) {
           // Fallback: try other chains from webhook metadata
           console.log(`⚠️  Token not found on chain ${chainId}, trying webhook chains`);
@@ -731,15 +762,16 @@ Deno.serve(async (req) => {
             if (fallbackToken) {
               tokenSymbol = fallbackToken.symbol;
               tokenName = fallbackToken.name;
+              tokenDecimals = fallbackToken.decimals || 18;
               tokenPrice = fallbackToken.price_usd || fallbackToken.price || fallbackToken.priceUsd || null;
-              console.log(`✅ Found token on different chain: ${tokenSymbol} - Price: $${tokenPrice || 'N/A'}`);
+              console.log(`✅ Found token on different chain: ${tokenSymbol} - Decimals: ${tokenDecimals} - Price: $${tokenPrice || 'N/A'}`);
             }
           }
         }
       }
       
       // Format and broadcast Telegram message with price and chain info
-      const message = formatActivityMessage(activity, tokenSymbol, tokenName, tokenPrice, chainId);
+      const message = formatActivityMessage(activity, tokenSymbol, tokenName, tokenPrice, tokenDecimals, chainId);
       await broadcastToSubscribers(message);
     }
 

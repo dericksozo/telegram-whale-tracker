@@ -642,7 +642,7 @@ function formatActivityMessage(
     message = `${emoji}  ${formattedAmount} #${symbol}${usdString} ${type} from ${fromLink} to ${toLink}`;
   }
   
-  message += `\n\n[Tx Link](${detailsLink})`;
+  message += `\n\n[Tx Link](${detailsLink}) · Powered by [Sim APIs](https://sim.dune.com/)`;
   
   return message;
 }

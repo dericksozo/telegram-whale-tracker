@@ -644,17 +644,17 @@ async function getSetupStatus() {
 }
 
 async function getAllWhalesAsJson() {
-  console.log("📥 Retrieving all whale data from KV...");
+  console.log("📥 Retrieving all whale addresses from KV...");
   
-  const whales = [];
   const uniqueAddresses = new Set();
   const chainIds = new Set();
+  let tokenCount = 0;
   
   const entries = kv.list({ prefix: ["whales"] });
   
   for await (const entry of entries) {
     const data = entry.value;
-    whales.push(data);
+    tokenCount++;
     
     if (data.chain_id) {
       chainIds.add(data.chain_id);
@@ -662,22 +662,24 @@ async function getAllWhalesAsJson() {
     
     if (data.holders && Array.isArray(data.holders)) {
       data.holders.forEach(holder => {
-        if (holder.address) {
-          uniqueAddresses.add(holder.address.toLowerCase());
+        // API returns 'wallet_address' field
+        if (holder.wallet_address) {
+          uniqueAddresses.add(holder.wallet_address.toLowerCase());
         }
       });
     }
   }
   
-  console.log(`✅ Retrieved ${whales.length} token entries with ${uniqueAddresses.size} unique whale addresses`);
+  const addresses = Array.from(uniqueAddresses);
+  
+  console.log(`✅ Retrieved ${tokenCount} tokens with ${addresses.length} unique whale addresses across ${chainIds.size} chains`);
   
   return {
-    tokens_count: whales.length,
-    unique_whale_addresses: uniqueAddresses.size,
-    unique_chains: Array.from(chainIds).length,
-    chains: Array.from(chainIds),
-    whale_addresses: Array.from(uniqueAddresses),
-    whales: whales,
+    tokens_count: tokenCount,
+    unique_whale_addresses: addresses.length,
+    chains_count: chainIds.size,
+    chains: Array.from(chainIds).sort((a, b) => a - b),
+    addresses: addresses.sort(),
   };
 }
 

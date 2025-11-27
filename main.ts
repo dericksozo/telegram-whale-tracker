@@ -216,8 +216,7 @@ async function createWebhook(name, addresses, chainIds) {
     url: `${WEBHOOK_BASE_URL}/activities`,
     type: "activities",
     addresses: addresses,
-    chain_ids: chainIds,
-    asset_type: "erc20", // Monitor ERC20 transfers
+    chain_ids: chainIds
   };
 
   console.log(`📤 Creating webhook with ${addresses.length} addresses on ${chainIds.length} chains`);

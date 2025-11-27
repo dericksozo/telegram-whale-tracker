@@ -643,6 +643,44 @@ async function getSetupStatus() {
   };
 }
 
+async function getAllWhalesAsJson() {
+  console.log("📥 Retrieving all whale data from KV...");
+  
+  const whales = [];
+  const uniqueAddresses = new Set();
+  const chainIds = new Set();
+  
+  const entries = kv.list({ prefix: ["whales"] });
+  
+  for await (const entry of entries) {
+    const data = entry.value;
+    whales.push(data);
+    
+    if (data.chain_id) {
+      chainIds.add(data.chain_id);
+    }
+    
+    if (data.holders && Array.isArray(data.holders)) {
+      data.holders.forEach(holder => {
+        if (holder.address) {
+          uniqueAddresses.add(holder.address.toLowerCase());
+        }
+      });
+    }
+  }
+  
+  console.log(`✅ Retrieved ${whales.length} token entries with ${uniqueAddresses.size} unique whale addresses`);
+  
+  return {
+    tokens_count: whales.length,
+    unique_whale_addresses: uniqueAddresses.size,
+    unique_chains: Array.from(chainIds).length,
+    chains: Array.from(chainIds),
+    whale_addresses: Array.from(uniqueAddresses),
+    whales: whales,
+  };
+}
+
 async function clearSetupData() {
   console.log("🗑️ Clearing setup data...");
   
@@ -761,6 +799,30 @@ Deno.serve(async (req) => {
       );
     } catch (error) {
       console.error("❌ Error getting status:", error);
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: error.message,
+        }, null, 2),
+        { status: 500, headers: { "content-type": "application/json; charset=utf-8" } }
+      );
+    }
+  }
+
+  // ========== SETUP: GET WHALES JSON ==========
+  if (pathname === "/setup/get-whales-json" && req.method === "GET") {
+    try {
+      const whalesData = await getAllWhalesAsJson();
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          ...whalesData,
+          duration_ms: Math.round(performance.now() - start),
+        }, null, 2),
+        { status: 200, headers: { "content-type": "application/json; charset=utf-8" } }
+      );
+    } catch (error) {
+      console.error("❌ Error getting whales:", error);
       return new Response(
         JSON.stringify({
           ok: false,

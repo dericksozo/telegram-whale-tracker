@@ -81,7 +81,7 @@ This endpoint fetches the top 20 token holders for each of the 150+ filtered tok
 
 ```bash
 # Fetch and store all whale addresses
-curl https://sim-whale-tracker.deno.dev/setup/fetch-whales
+curl https://sim-whale-tracker--subscriptions-setup.deno.dev/setup/fetch-whales
 ```
 
 **What it does:**
@@ -108,7 +108,7 @@ This endpoint creates Sim APIs webhooks to monitor all whale addresses:
 
 ```bash
 # Create webhooks to monitor whales
-curl -X POST https://sim-whale-tracker.deno.dev/setup/create-webhooks
+curl -X POST https://sim-whale-tracker--subscriptions-setup.deno.dev/setup/create-webhooks
 ```
 
 **What it does:**
@@ -140,7 +140,7 @@ curl -X POST https://sim-whale-tracker.deno.dev/setup/create-webhooks
 ### Check Setup Status
 
 ```bash
-curl https://sim-whale-tracker.deno.dev/setup/status
+curl https://sim-whale-tracker--subscriptions-setup.deno.dev/setup/status
 ```
 
 **Output:**

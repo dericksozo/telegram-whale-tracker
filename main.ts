@@ -505,18 +505,11 @@ async function fetchAllWhales() {
 async function createWebhooksForWhales() {
   console.log("🪝 Starting webhook creation process...");
 
-  // Fetch whale data from the get-whales-json endpoint
-  console.log("📥 Fetching whale data from /setup/get-whales-json...");
-  const whalesUrl = `${WEBHOOK_BASE_URL}/setup/get-whales-json`;
-  const whalesResponse = await fetch(whalesUrl);
+  // Get whale data directly from KV
+  console.log("📥 Retrieving whale data from KV...");
+  const whalesData = await getAllWhalesAsJson();
   
-  if (!whalesResponse.ok) {
-    throw new Error(`Failed to fetch whales data: ${whalesResponse.status} ${whalesResponse.statusText}`);
-  }
-  
-  const whalesData = await whalesResponse.json();
-  
-  if (!whalesData.ok || !whalesData.addresses || whalesData.addresses.length === 0) {
+  if (!whalesData.addresses || whalesData.addresses.length === 0) {
     console.error("❌ No whale addresses found. Run /setup/fetch-whales first.");
     return {
       success: false,

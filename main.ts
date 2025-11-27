@@ -525,62 +525,43 @@ async function createWebhooksForWhales() {
   console.log(`   Unique whale addresses: ${addresses.length}`);
   console.log(`   Chains: ${chains.length}`);
 
-  // Sim API has a limit on addresses per webhook (typically 1000-2000)
-  // We'll split into batches if needed
-  const BATCH_SIZE = 1000;
-  const batches = [];
+  // Create a single webhook with ALL addresses (no batching)
+  console.log(`📦 Creating single webhook with all ${addresses.length} addresses...`);
   
-  for (let i = 0; i < addresses.length; i += BATCH_SIZE) {
-    batches.push(addresses.slice(i, i + BATCH_SIZE));
-  }
-
-  console.log(`📦 Creating ${batches.length} webhook(s)...`);
-  console.log(`⏱️  Rate limit: 5 req/sec max, using 250ms delay between webhooks`);
-
-  const webhookIds = [];
+  const name = "Whale Tracker - All Chains";
+  const webhook = await createWebhook(name, addresses, chains);
   
-  for (let i = 0; i < batches.length; i++) {
-    const batch = batches[i];
-    const name = `Whale Tracker ${i + 1}/${batches.length}`;
+  if (webhook && webhook.id) {
+    // Store webhook ID in KV
+    const key = ["webhooks", "ids", webhook.id];
+    await kv.set(key, {
+      id: webhook.id,
+      name: name,
+      addresses_count: addresses.length,
+      chain_ids: chains,
+      created_at: nowISO(),
+    });
     
-    console.log(`\n🔄 Creating webhook ${i + 1}/${batches.length} with ${batch.length} addresses...`);
+    console.log(`✅ Webhook created successfully: ${webhook.id}`);
+    console.log(`   Monitoring ${addresses.length} addresses across ${chains.length} chains`);
     
-    const webhook = await createWebhook(name, batch, chains);
-    
-    if (webhook && webhook.id) {
-      webhookIds.push(webhook.id);
-      
-      // Store webhook ID in KV
-      const key = ["webhooks", "ids", webhook.id];
-      await kv.set(key, {
-        id: webhook.id,
-        name: name,
-        addresses_count: batch.length,
-        chain_ids: chains,
-        created_at: nowISO(),
-      });
-      
-      console.log(`✅ Webhook created: ${webhook.id}`);
-    } else {
-      console.error(`❌ Failed to create webhook ${i + 1}`);
-    }
-
-    // Rate limiting: Sim APIs allows max 5 req/sec, we use 250ms (4 req/sec) to be safe
-    if (i < batches.length - 1) {
-      await rateLimitedDelay();
-    }
+    return {
+      success: true,
+      webhooks_created: 1,
+      webhook_ids: [webhook.id],
+      webhook_id: webhook.id,
+      total_addresses: addresses.length,
+      chains: chains,
+    };
+  } else {
+    console.error(`❌ Failed to create webhook`);
+    return {
+      success: false,
+      error: "Webhook creation failed",
+      webhooks_created: 0,
+      webhook_ids: [],
+    };
   }
-
-  console.log(`\n✅ Webhook creation complete!`);
-  console.log(`   Created: ${webhookIds.length}/${batches.length} webhooks`);
-
-  return {
-    success: true,
-    webhooks_created: webhookIds.length,
-    webhook_ids: webhookIds,
-    total_addresses: addresses.length,
-    chains: chains,
-  };
 }
 
 async function getSetupStatus() {

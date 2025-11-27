@@ -819,6 +819,49 @@ Deno.serve(async (req) => {
     }
   }
 
+  // ========== SETUP: VIEW WEBHOOKS ==========
+  if (pathname === "/setup/view-webhooks" && req.method === "GET") {
+    try {
+      const url = "https://api.sim.dune.com/beta/evm/subscriptions/webhooks";
+      console.log("🔍 Fetching webhooks from Sim API...");
+      
+      const response = await fetch(url, {
+        method: "GET",
+        headers: {
+          "X-Sim-Api-Key": SIM_API_KEY,
+        },
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Failed to fetch webhooks: ${response.status} ${errorText}`);
+      }
+
+      const data = await response.json();
+      console.log(`✅ Retrieved ${data?.webhooks?.length || 0} webhook(s)`);
+
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          count: data?.webhooks?.length || 0,
+          webhooks: data.webhooks || [],
+          next_offset: data.next_offset || null,
+          duration_ms: Math.round(performance.now() - start),
+        }, null, 2),
+        { status: 200, headers: { "content-type": "application/json; charset=utf-8" } }
+      );
+    } catch (error) {
+      console.error("❌ Error fetching webhooks:", error);
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: error.message,
+        }, null, 2),
+        { status: 500, headers: { "content-type": "application/json; charset=utf-8" } }
+      );
+    }
+  }
+
   // ========== SETUP: CLEAR DATA ==========
   if (pathname === "/setup/clear" && (req.method === "GET" || req.method === "POST")) {
     try {

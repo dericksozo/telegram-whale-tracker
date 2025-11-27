@@ -12,7 +12,7 @@ const _TELEGRAM_CHAT_ID = Deno.env.get("TELEGRAM_CHAT_ID") || "";
 const DEFAULT_CHAIN_ID = parseInt(Deno.env.get("DEFAULT_CHAIN_ID") || "1");
 
 // Webhook configuration
-const WEBHOOK_BASE_URL = Deno.env.get("WEBHOOK_BASE_URL") || "https://sim-whale-tracker--subscriptions-setup.deno.dev";
+const WEBHOOK_BASE_URL = Deno.env.get("WEBHOOK_BASE_URL") || "https://sim-whale-tracker.deno.dev/activities";
 
 // How many top holders to fetch per token (default: 20)
 const TOP_HOLDERS_LIMIT = parseInt(Deno.env.get("TOP_HOLDERS_LIMIT") || "20");
@@ -52,30 +52,11 @@ function getExplorerLink(txHash, chainId) {
   const explorers = {
     1: "https://etherscan.io/tx/",
     10: "https://optimistic.etherscan.io/tx/",
-    14: "https://flare-explorer.flare.network/tx/",
     56: "https://bscscan.com/tx/",
-    130: "https://uniscan.xyz/tx/",
     137: "https://polygonscan.com/tx/",
-    146: "https://sonicscan.org/tx/",
-    204: "https://opbnbscan.com/tx/",
-    250: "https://ftmscan.com/tx/",
-    480: "https://worldscan.org/tx/",
-    999: "https://explorer.hyperliquid.xyz/tx/",
-    1329: "https://seitrace.com/tx/",
-    2020: "https://explorer.roninchain.com/tx/",
-    2741: "https://explorer.testnet.abs.xyz/tx/",
-    5000: "https://mantlescan.xyz/tx/",
-    8217: "https://klaytnscope.com/tx/",
     8453: "https://basescan.org/tx/",
-    9745: "https://plasmascan.com/tx/",
     42161: "https://arbiscan.io/tx/",
-    42220: "https://celoscan.io/tx/",
     43114: "https://snowtrace.io/tx/",
-    57073: "https://explorer.inkonchain.com/tx/",
-    59144: "https://lineascan.build/tx/",
-    80094: "https://bartio.beratrail.io/tx/",
-    747474: "https://katana.explorer.startale.com/tx/",
-    21000000: "https://cornscan.io/tx/",
   };
   const baseUrl = explorers[chainId] || "https://etherscan.io/tx/";
   return `${baseUrl}${txHash}`;
@@ -85,30 +66,11 @@ function getAddressExplorerLink(address, chainId) {
   const explorers = {
     1: "https://etherscan.io/address/",
     10: "https://optimistic.etherscan.io/address/",
-    14: "https://flare-explorer.flare.network/address/",
     56: "https://bscscan.com/address/",
-    130: "https://uniscan.xyz/address/",
     137: "https://polygonscan.com/address/",
-    146: "https://sonicscan.org/address/",
-    204: "https://opbnbscan.com/address/",
-    250: "https://ftmscan.com/address/",
-    480: "https://worldscan.org/address/",
-    999: "https://explorer.hyperliquid.xyz/address/",
-    1329: "https://seitrace.com/address/",
-    2020: "https://explorer.roninchain.com/address/",
-    2741: "https://explorer.testnet.abs.xyz/address/",
-    5000: "https://mantlescan.xyz/address/",
-    8217: "https://klaytnscope.com/address/",
     8453: "https://basescan.org/address/",
-    9745: "https://plasmascan.com/address/",
     42161: "https://arbiscan.io/address/",
-    42220: "https://celoscan.io/address/",
     43114: "https://snowtrace.io/address/",
-    57073: "https://explorer.inkonchain.com/address/",
-    59144: "https://lineascan.build/address/",
-    80094: "https://bartio.beratrail.io/address/",
-    747474: "https://katana.explorer.startale.com/address/",
-    21000000: "https://cornscan.io/address/",
   };
   const baseUrl = explorers[chainId] || "https://etherscan.io/address/";
   return `${baseUrl}${address}`;
@@ -185,15 +147,13 @@ function logActivitiesSummary(payload) {
 // ============== SIM API HELPERS ==============
 
 async function fetchTokenHolders(tokenAddress, chainId) {
-  const url = `https://api.sim.dune.com/v1/evm/token-holders/${tokenAddress}?chain_id=${chainId}&limit=${TOP_HOLDERS_LIMIT}`;
-  console.log(`🔍 Fetching token holders: ${url}`);
+  // Correct URL format: /token-holders/{chain_id}/{token_address}?api_key=xxx
+  const url = `https://api.sim.dune.com/v1/evm/token-holders/${chainId}/${tokenAddress}?api_key=${SIM_API_KEY}&limit=${TOP_HOLDERS_LIMIT}`;
+  console.log(`🔍 Fetching token holders: ${url.replace(SIM_API_KEY, 'xxx...')}`); // Hide API key in logs
   
   try {
     const response = await fetch(url, {
       method: "GET",
-      headers: {
-        "X-Sim-Api-Key": SIM_API_KEY,
-      },
     });
 
     if (!response.ok) {
@@ -460,17 +420,9 @@ function formatActivityMessage(activity, tokenSymbol, _tokenName, tokenPrice, to
 async function fetchAllWhales() {
   console.log("🐋 Starting whale fetching process...");
   
-  // Fetch the filtered tokens from GitHub Gist
-  console.log("📥 Fetching token list from GitHub Gist...");
-  const tokensUrl = "https://gist.githubusercontent.com/dericksozo/3ad9c3caab9c1a6e0603f804affcda24/raw/297ea8b8c1156fe3e499bdd148bff744445636b2/top_erc20_tokens_filtered.json";
-  const tokensResponse = await fetch(tokensUrl);
-  
-  if (!tokensResponse.ok) {
-    throw new Error(`Failed to fetch tokens: ${tokensResponse.status} ${tokensResponse.statusText}`);
-  }
-  
-  const tokens = await tokensResponse.json();
-  console.log(`✅ Fetched token list from GitHub Gist`);
+  // Read the filtered tokens file
+  const tokensFile = await Deno.readTextFile("./data/top_erc20_tokens_filtered.json");
+  const tokens = JSON.parse(tokensFile);
   
   console.log(`📊 Found ${tokens.length} tokens to process`);
   console.log(`⏱️  Rate limit: 5 req/sec max, using 250ms delay between requests`);
@@ -583,40 +535,57 @@ async function createWebhooksForWhales() {
     };
   }
 
-  // Create a single webhook with all addresses
-  console.log(`📦 Creating webhook with all ${addresses.length} addresses...`);
-  console.log(`⏱️  Rate limit: 5 req/sec max`);
+  // Sim API has a limit on addresses per webhook (typically 1000-2000)
+  // We'll split into batches if needed
+  const BATCH_SIZE = 1000;
+  const batches = [];
+  
+  for (let i = 0; i < addresses.length; i += BATCH_SIZE) {
+    batches.push(addresses.slice(i, i + BATCH_SIZE));
+  }
+
+  console.log(`📦 Creating ${batches.length} webhook(s)...`);
+  console.log(`⏱️  Rate limit: 5 req/sec max, using 250ms delay between webhooks`);
 
   const webhookIds = [];
-  const name = "Whale Tracker - All Chains";
   
-  console.log(`\n🔄 Creating webhook with ${addresses.length} addresses across ${chains.length} chains...`);
-  
-  const webhook = await createWebhook(name, addresses, chains);
-  
-  if (webhook && webhook.id) {
-    webhookIds.push(webhook.id);
+  for (let i = 0; i < batches.length; i++) {
+    const batch = batches[i];
+    const name = `Whale Tracker ${i + 1}/${batches.length}`;
     
-    // Store webhook ID in KV
-    const key = ["webhooks", "ids", webhook.id];
-    await kv.set(key, {
-      id: webhook.id,
-      name: name,
-      addresses_count: addresses.length,
-      chain_ids: chains,
-      created_at: nowISO(),
-    });
+    console.log(`\n🔄 Creating webhook ${i + 1}/${batches.length} with ${batch.length} addresses...`);
     
-    console.log(`✅ Webhook created: ${webhook.id}`);
-  } else {
-    console.error(`❌ Failed to create webhook`);
+    const webhook = await createWebhook(name, batch, chains);
+    
+    if (webhook && webhook.id) {
+      webhookIds.push(webhook.id);
+      
+      // Store webhook ID in KV
+      const key = ["webhooks", "ids", webhook.id];
+      await kv.set(key, {
+        id: webhook.id,
+        name: name,
+        addresses_count: batch.length,
+        chain_ids: chains,
+        created_at: nowISO(),
+      });
+      
+      console.log(`✅ Webhook created: ${webhook.id}`);
+    } else {
+      console.error(`❌ Failed to create webhook ${i + 1}`);
+    }
+
+    // Rate limiting: Sim APIs allows max 5 req/sec, we use 250ms (4 req/sec) to be safe
+    if (i < batches.length - 1) {
+      await rateLimitedDelay();
+    }
   }
 
   console.log(`\n✅ Webhook creation complete!`);
-  console.log(`   Created: ${webhookIds.length} webhook(s) with ${addresses.length} addresses`);
+  console.log(`   Created: ${webhookIds.length}/${batches.length} webhooks`);
 
   return {
-    success: webhookIds.length > 0,
+    success: true,
     webhooks_created: webhookIds.length,
     webhook_ids: webhookIds,
     total_addresses: addresses.length,

@@ -420,11 +420,18 @@ function formatActivityMessage(activity, tokenSymbol, _tokenName, tokenPrice, to
 async function fetchAllWhales() {
   console.log("🐋 Starting whale fetching process...");
   
-  // Read the filtered tokens file
-  const tokensFile = await Deno.readTextFile("./data/top_erc20_tokens_filtered.json");
-  const tokens = JSON.parse(tokensFile);
+  // Fetch the filtered tokens from GitHub Gist
+  console.log("📥 Fetching token list from GitHub Gist...");
+  const tokensUrl = "https://gist.githubusercontent.com/dericksozo/3ad9c3caab9c1a6e0603f804affcda24/raw/297ea8b8c1156fe3e499bdd148bff744445636b2/top_erc20_tokens_filtered.json";
+  const tokensResponse = await fetch(tokensUrl);
   
-  console.log(`📊 Found ${tokens.length} tokens to process`);
+  if (!tokensResponse.ok) {
+    throw new Error(`Failed to fetch tokens from GitHub Gist: ${tokensResponse.status} ${tokensResponse.statusText}`);
+  }
+  
+  const tokens = await tokensResponse.json();
+  console.log(`✅ Fetched ${tokens.length} tokens from GitHub Gist`);
+  
   console.log(`⏱️  Rate limit: 5 req/sec max, using 250ms delay between requests`);
   console.log(`⏱️  Estimated time: ~${Math.ceil(tokens.length * 0.25 / 60)} minutes (${tokens.length} requests × 250ms)`);
   

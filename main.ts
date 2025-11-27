@@ -12,7 +12,7 @@ const _TELEGRAM_CHAT_ID = Deno.env.get("TELEGRAM_CHAT_ID") || "";
 const DEFAULT_CHAIN_ID = parseInt(Deno.env.get("DEFAULT_CHAIN_ID") || "1");
 
 // Webhook configuration
-const WEBHOOK_BASE_URL = Deno.env.get("WEBHOOK_BASE_URL") || "https://sim-whale-tracker.deno.dev/activities";
+const WEBHOOK_BASE_URL = Deno.env.get("WEBHOOK_BASE_URL") || "https://sim-whale-tracker--subscriptions-setup.deno.dev";
 
 // How many top holders to fetch per token (default: 20)
 const TOP_HOLDERS_LIMIT = parseInt(Deno.env.get("TOP_HOLDERS_LIMIT") || "20");

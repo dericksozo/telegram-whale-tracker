@@ -505,42 +505,33 @@ async function fetchAllWhales() {
 async function createWebhooksForWhales() {
   console.log("🪝 Starting webhook creation process...");
 
-  // Collect all whale addresses from KV
-  const whaleAddresses = new Set();
-  const chainIds = new Set();
-  let tokenCount = 0;
-
-  const entries = kv.list({ prefix: ["whales"] });
+  // Fetch whale data from the get-whales-json endpoint
+  console.log("📥 Fetching whale data from /setup/get-whales-json...");
+  const whalesUrl = `${WEBHOOK_BASE_URL}/setup/get-whales-json`;
+  const whalesResponse = await fetch(whalesUrl);
   
-  for await (const entry of entries) {
-    const data = entry.value;
-    if (data.holders && Array.isArray(data.holders)) {
-      tokenCount++;
-      chainIds.add(data.chain_id);
-      
-      data.holders.forEach(holder => {
-        if (holder.address) {
-          whaleAddresses.add(holder.address.toLowerCase());
-        }
-      });
-    }
+  if (!whalesResponse.ok) {
+    throw new Error(`Failed to fetch whales data: ${whalesResponse.status} ${whalesResponse.statusText}`);
   }
-
-  const addresses = Array.from(whaleAddresses);
-  const chains = Array.from(chainIds);
-
-  console.log(`📊 Statistics:`);
-  console.log(`   Tokens: ${tokenCount}`);
-  console.log(`   Unique whale addresses: ${addresses.length}`);
-  console.log(`   Chains: ${chains.length}`);
-
-  if (addresses.length === 0) {
+  
+  const whalesData = await whalesResponse.json();
+  
+  if (!whalesData.ok || !whalesData.addresses || whalesData.addresses.length === 0) {
     console.error("❌ No whale addresses found. Run /setup/fetch-whales first.");
     return {
       success: false,
       error: "No whale addresses found",
     };
   }
+
+  const addresses = whalesData.addresses;
+  const chains = whalesData.chains;
+  const tokenCount = whalesData.tokens_count;
+
+  console.log(`📊 Statistics:`);
+  console.log(`   Tokens: ${tokenCount}`);
+  console.log(`   Unique whale addresses: ${addresses.length}`);
+  console.log(`   Chains: ${chains.length}`);
 
   // Sim API has a limit on addresses per webhook (typically 1000-2000)
   // We'll split into batches if needed

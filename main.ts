@@ -1,37 +1,45 @@
 // main.ts
-// Webhook server for Sim API subscriptions with KV storage
-// - POST /activities       (activity payloads from Sim)
-// - POST /transactions     (transaction payloads from Sim)
-// - POST /balances         (balance change payloads from Sim)
-// - GET  /health           (health check)
-// Run: deno task start
-
-// USDC on Ethereum contract address: 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
+// Telegram Whale Tracker - Complete whale tracking system
+// Powered by Sim APIs (https://sim.dune.com)
 
 /// <reference lib="deno.unstable" />
 
-// Sim API Configuration
+// ============== CONFIGURATION ==============
+
 const SIM_API_KEY = Deno.env.get("SIM_API_KEY") || "sim_3HEp7EPlougJMPs9GhCOXVjqwyfwIhO0";
-
-// Telegram Bot Configuration
 const TELEGRAM_BOT_TOKEN = Deno.env.get("TELEGRAM_BOT_TOKEN") || "8463582584:AAEca8NPbe9cF5cHDgd5stDj_64KcbEXfK4";
-const _TELEGRAM_CHAT_ID = Deno.env.get("TELEGRAM_CHAT_ID") || ""; // Legacy - now using subscription system
-
-// Default chain ID if not provided in webhook (1 = Ethereum Mainnet)
+const _TELEGRAM_CHAT_ID = Deno.env.get("TELEGRAM_CHAT_ID") || "";
 const DEFAULT_CHAIN_ID = parseInt(Deno.env.get("DEFAULT_CHAIN_ID") || "1");
 
-// --- KV: open once (Deploy auto-provisions; CLI uses local store). ---
+// Webhook configuration
+const WEBHOOK_BASE_URL = Deno.env.get("WEBHOOK_BASE_URL") || "https://sim-whale-tracker.deno.dev";
+
+// How many top holders to fetch per token (default: 3 for whale tracking)
+const TOP_HOLDERS_LIMIT = parseInt(Deno.env.get("TOP_HOLDERS_LIMIT") || "3");
+
+// Rate limiting: Sim APIs allows maximum 5 requests per second
+// We use 250ms delay (4 req/sec) to be safe and account for request processing time
+const RATE_LIMIT_DELAY_MS = 250;
+
+// Open Deno KV once
 const kv = await Deno.openKv();
+
+// ============== UTILITY FUNCTIONS ==============
 
 function nowISO() {
   return new Date().toISOString();
 }
 
 /**
- * Format number with commas for readability
- * Uses built-in Intl.NumberFormat for proper locale formatting
+ * Rate limiter for Sim APIs
+ * Sim APIs has a limit of 5 requests per second
+ * We use 250ms delay (4 req/sec) to stay safely under the limit
  */
-function formatNumber(value: string | number): string {
+async function rateLimitedDelay() {
+  await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_DELAY_MS));
+}
+
+function formatNumber(value) {
   const num = typeof value === 'string' ? parseFloat(value) : value;
   if (isNaN(num)) return '0';
   return new Intl.NumberFormat('en-US', {
@@ -40,11 +48,8 @@ function formatNumber(value: string | number): string {
   }).format(num);
 }
 
-/**
- * Generate blockchain explorer link based on chain ID
- */
-function getExplorerLink(txHash: string, chainId: number): string {
-  const explorers: Record<number, string> = {
+function getExplorerLink(txHash, chainId) {
+  const explorers = {
     1: "https://etherscan.io/tx/",
     10: "https://optimistic.etherscan.io/tx/",
     56: "https://bscscan.com/tx/",
@@ -52,18 +57,13 @@ function getExplorerLink(txHash: string, chainId: number): string {
     8453: "https://basescan.org/tx/",
     42161: "https://arbiscan.io/tx/",
     43114: "https://snowtrace.io/tx/",
-    84532: "https://sepolia.basescan.org/tx/",
   };
-  
   const baseUrl = explorers[chainId] || "https://etherscan.io/tx/";
   return `${baseUrl}${txHash}`;
 }
 
-/**
- * Generate blockchain explorer address link based on chain ID
- */
-function getAddressExplorerLink(address: string, chainId: number): string {
-  const explorers: Record<number, string> = {
+function getAddressExplorerLink(address, chainId) {
+  const explorers = {
     1: "https://etherscan.io/address/",
     10: "https://optimistic.etherscan.io/address/",
     56: "https://bscscan.com/address/",
@@ -71,33 +71,26 @@ function getAddressExplorerLink(address: string, chainId: number): string {
     8453: "https://basescan.org/address/",
     42161: "https://arbiscan.io/address/",
     43114: "https://snowtrace.io/address/",
-    84532: "https://sepolia.basescan.org/address/",
   };
-  
   const baseUrl = explorers[chainId] || "https://etherscan.io/address/";
   return `${baseUrl}${address}`;
 }
 
-// --- KV helpers ---
+// ============== KV HELPERS ==============
 
-async function sha256Hex(data: string) {
+async function sha256Hex(data) {
   const bytes = new TextEncoder().encode(data);
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-function headersToObject(h: Headers) {
-  const obj: Record<string, string> = {};
+function headersToObject(h) {
+  const obj = {};
   for (const [k, v] of h.entries()) obj[k] = v;
   return obj;
 }
 
-/**
- * Store the ORIGINAL raw body (unmodified) plus headers for traceability.
- * Keyed by sim-webhook-id (or similar) when present; otherwise by SHA-256 of the body.
- * Uses an atomic check to avoid overwriting on retries (idempotent insert).
- */
-async function kvStoreRaw(kind: string, req: Request, rawBody: string) {
+async function kvStoreRaw(kind, req, rawBody) {
   try {
     const webhookId = req.headers.get("sim-webhook-id") ||
       req.headers.get("x-webhook-id") ||
@@ -105,25 +98,23 @@ async function kvStoreRaw(kind: string, req: Request, rawBody: string) {
     const fallback = rawBody ? await sha256Hex(rawBody) : crypto.randomUUID();
     const unique = webhookId || fallback;
 
-    const key = ["sim", "webhooks", kind, unique] as const;
+    const key = ["sim", "webhooks", kind, unique];
     const value = {
       received_at: nowISO(),
       path: new URL(req.url).pathname,
       headers: headersToObject(req.headers),
-      body_text: rawBody, // original payload as-is
+      body_text: rawBody,
     };
 
-    // Insert only if key does not exist (no overwrite on retry).
     await kv.atomic().check({ key, versionstamp: null }).set(key, value).commit();
   } catch (e) {
     console.error("KV storage error:", e);
   }
 }
 
-// --- Logging helpers ---
+// ============== LOGGING HELPERS ==============
 
-// deno-lint-ignore no-explicit-any
-function logActivitiesSummary(payload: any) {
+function logActivitiesSummary(payload) {
   console.log("\n========== RAW ACTIVITIES PAYLOAD ==========");
   console.log(JSON.stringify(payload, null, 2));
   console.log("============================================\n");
@@ -136,9 +127,8 @@ function logActivitiesSummary(payload: any) {
 
   console.log(`\n========== ACTIVITIES (${acts.length}) @ ${nowISO()} ==========`);
 
-  const counts: Record<string, number> = {};
-  // deno-lint-ignore no-explicit-any
-  acts.forEach((a: any, i: number) => {
+  const counts = {};
+  acts.forEach((a, i) => {
     const t = a?.type ?? "unknown";
     counts[t] = (counts[t] ?? 0) + 1;
     console.log(`\n[Activity ${i}]`);
@@ -154,163 +144,36 @@ function logActivitiesSummary(payload: any) {
   console.log(`\nSummary: ${acts.length} activities - type counts:`, counts);
 }
 
-// deno-lint-ignore no-explicit-any
-function logTransactionsSummary(payload: any) {
-  console.log("\n========== RAW TRANSACTIONS PAYLOAD ==========");
-  console.log(JSON.stringify(payload, null, 2));
-  console.log("==============================================\n");
+// ============== SIM API HELPERS ==============
 
-  const txs = payload?.transactions;
-  if (!Array.isArray(txs)) {
-    console.log("No valid 'transactions' array found.");
-    return;
-  }
-
-  console.log(`\n========== TRANSACTIONS (${txs.length}) @ ${nowISO()} ==========`);
-
-  const typeCounts: Record<string, number> = {};
-  const successCounts: Record<string, number> = { true: 0, false: 0 };
-  let logsTotal = 0;
-
-  // deno-lint-ignore no-explicit-any
-  txs.forEach((tx: any, i: number) => {
-    const ttype = tx?.transaction_type ?? "unknown";
-    typeCounts[ttype] = (typeCounts[ttype] ?? 0) + 1;
-    const success = Boolean(tx?.success);
-    successCounts[String(success)] = (successCounts[String(success)] ?? 0) + 1;
-    const logsLen = Array.isArray(tx?.logs) ? tx.logs.length : 0;
-    logsTotal += logsLen;
-
-    console.log(`\n[Transaction ${i}]`);
-    console.log(`  Chain: ${tx?.chain} (${tx?.chain_id})`);
-    console.log(`  Hash: ${tx?.hash}`);
-    console.log(`  Block: ${tx?.block_number} @ ${tx?.block_time}`);
-    console.log(`  From: ${tx?.from}`);
-    console.log(`  To: ${tx?.to}`);
-    console.log(`  Type: ${ttype}`);
-    console.log(`  Success: ${success}`);
-    console.log(`  Value: ${tx?.value}`);
-    console.log(`  Gas Price: ${tx?.gas_price}`);
-    console.log(`  Gas Used: ${tx?.gas_used}`);
-    if (tx?.decoded) {
-      console.log(`  Decoded: ${tx.decoded?.name} (${Array.isArray(tx.decoded?.inputs) ? tx.decoded.inputs.length : 0} inputs)`);
-    }
-    console.log(`  Logs: ${logsLen}`);
-  });
-
-  console.log(`\nSummary: ${txs.length} transactions`);
-  console.log(`  Type counts:`, typeCounts);
-  console.log(`  Success counts:`, successCounts);
-  console.log(`  Total logs: ${logsTotal}`);
-}
-
-// deno-lint-ignore no-explicit-any
-function logBalancesSummary(payload: any) {
-  console.log("\n========== RAW BALANCE PAYLOAD ==========");
-  console.log(JSON.stringify(payload, null, 2));
-  console.log("=========================================\n");
-
-  const changes = payload?.balance_changes;
-  if (!Array.isArray(changes)) {
-    console.log("No valid 'balance_changes' array found.");
-    return;
-  }
-
-  console.log(`\n========== BALANCE CHANGES (${changes.length}) @ ${nowISO()} ==========`);
-
-  const directionCounts: Record<string, number> = { in: 0, out: 0 };
-  const assetSymbols = new Set<string>();
-
-  // deno-lint-ignore no-explicit-any
-  changes.forEach((change: any, i: number) => {
-    const dir = change?.direction ?? "unknown";
-    directionCounts[dir] = (directionCounts[dir] ?? 0) + 1;
-    if (change?.asset?.symbol) {
-      assetSymbols.add(change.asset.symbol);
-    }
-
-    console.log(`\n[Balance ${i}]`);
-    console.log(`  Address: ${change?.address}`);
-    console.log(`  Chain: ${change?.chain} (${change?.chain_id})`);
-    console.log(`  Direction: ${change?.direction}`);
-    console.log(`  Amount: ${change?.amount} (raw: ${change?.amount_raw})`);
-    console.log(`  Asset: ${change?.asset?.symbol} (${change?.asset?.name})`);
-    console.log(`  Contract: ${change?.asset?.contract_address}`);
-    console.log(`  Decimals: ${change?.asset?.decimals}`);
-    console.log(`  Block: ${change?.block_number} @ ${change?.block_time}`);
-    console.log(`  Transaction: ${change?.tx_hash}`);
-  });
-
-  console.log(`\nSummary: ${changes.length} balance changes`);
-  console.log(`  Direction counts:`, directionCounts);
-  console.log(`  Assets:`, Array.from(assetSymbols).join(", "));
-}
-
-// --- Sim API Helpers ---
-
-/**
- * Fetch webhook metadata to get chain_ids
- * @param webhookId - The webhook UUID
- * @returns Webhook metadata or null
- */
-// deno-lint-ignore no-explicit-any
-async function fetchWebhookMetadata(webhookId: string): Promise<any> {
-  // Check cache first
-  const cacheKey = ["webhook", "metadata", webhookId];
-  const cached = await kv.get(cacheKey);
-  if (cached.value) {
-    console.log(`✅ Using cached webhook metadata for ${webhookId}`);
-    return cached.value;
-  }
-  
-  const url = `https://api.sim.dune.com/beta/evm/subscriptions/webhooks/${webhookId}`;
-  console.log(`🔍 Fetching webhook metadata: ${url}`);
+async function fetchTokenHolders(tokenAddress, chainId) {
+  // Correct URL format: /token-holders/{chain_id}/{token_address}?api_key=xxx
+  const url = `https://api.sim.dune.com/v1/evm/token-holders/${chainId}/${tokenAddress}?api_key=${SIM_API_KEY}&limit=${TOP_HOLDERS_LIMIT}`;
+  console.log(`🔍 Fetching token holders: ${url.replace(SIM_API_KEY, 'xxx...')}`); // Hide API key in logs
   
   try {
     const response = await fetch(url, {
       method: "GET",
-      headers: {
-        "X-Sim-Api-Key": SIM_API_KEY,
-      },
     });
-    
+
     if (!response.ok) {
-      console.warn(`⚠️  Failed to fetch webhook metadata: ${response.status}`);
+      const errorText = await response.text();
+      console.warn(`⚠️ Failed to fetch token holders for ${tokenAddress}: ${response.status}`);
+      console.warn(`  Response: ${errorText}`);
       return null;
     }
-    
+
     const data = await response.json();
-    console.log(`✅ Webhook chain_ids:`, data.chain_ids);
-    
-    // Cache for 1 hour
-    await kv.set(cacheKey, data, { expireIn: 3600000 });
-    
+    console.log(`✅ Fetched ${data?.holders?.length || 0} holders for ${tokenAddress}`);
     return data;
   } catch (error) {
-    console.error(`❌ Error fetching webhook metadata:`, error);
+    console.error(`❌ Error fetching token holders for ${tokenAddress}:`, error);
     return null;
   }
 }
 
-/**
- * Check if token info response is valid (has symbol and name)
- */
-// deno-lint-ignore no-explicit-any
-function isValidTokenInfo(tokenInfo: any): boolean {
-  return tokenInfo?.symbol && tokenInfo?.symbol !== null && 
-         tokenInfo?.name && tokenInfo?.name !== null;
-}
-
-/**
- * Fetch token information from Sim API Token Info endpoint
- * @param tokenAddress - The token contract address
- * @param chainId - The chain ID
- * @returns Token info or null if not found
- */
-// deno-lint-ignore no-explicit-any
-async function fetchTokenInfo(tokenAddress: string, chainId: number): Promise<any> {
+async function fetchTokenInfo(tokenAddress, chainId) {
   const url = `https://api.sim.dune.com/v1/evm/token-info/${tokenAddress}?chain_ids=${chainId}`;
-  
   console.log(`🌐 Fetching token info: ${url}`);
   
   try {
@@ -320,32 +183,24 @@ async function fetchTokenInfo(tokenAddress: string, chainId: number): Promise<an
         "X-Sim-Api-Key": SIM_API_KEY,
       },
     });
-    
+
     if (!response.ok) {
       const errorText = await response.text();
-      console.warn(`⚠️  Failed to fetch token info for ${tokenAddress} on chain ${chainId}: ${response.status}`);
-      console.warn(`   Response: ${errorText}`);
+      console.warn(`⚠️ Failed to fetch token info for ${tokenAddress}: ${response.status}`);
+      console.warn(`  Response: ${errorText}`);
       return null;
     }
-    
+
     const data = await response.json();
-    console.log(`📥 Token Info API response:`, JSON.stringify(data, null, 2));
-    
-    // Return the first token from the tokens array if it's valid
     if (data?.tokens && Array.isArray(data.tokens) && data.tokens.length > 0) {
       const tokenInfo = data.tokens[0];
-      
-      // Check if it's a valid response (has symbol and name)
-      if (isValidTokenInfo(tokenInfo)) {
-        console.log(`✅ Fetched valid token info: ${tokenInfo.symbol} (${tokenInfo.name}) on chain ${tokenInfo.chain_id}`);
+      if (tokenInfo?.symbol && tokenInfo?.name) {
+        console.log(`✅ Fetched token info: ${tokenInfo.symbol} (${tokenInfo.name})`);
         return tokenInfo;
-      } else {
-        console.warn(`⚠️  Token info returned but missing symbol/name (likely wrong chain)`);
-        return null;
       }
     }
     
-    console.warn(`⚠️  Token info API returned no tokens in array`);
+    console.warn(`⚠️ Token info API returned no valid tokens`);
     return null;
   } catch (error) {
     console.error(`❌ Error fetching token info for ${tokenAddress}:`, error);
@@ -353,149 +208,137 @@ async function fetchTokenInfo(tokenAddress: string, chainId: number): Promise<an
   }
 }
 
-/**
- * Fetch token info by trying multiple chains
- * @param tokenAddress - The token contract address
- * @param chainIds - Array of chain IDs to try
- * @returns Token info or null if not found on any chain
- */
-// deno-lint-ignore no-explicit-any
-async function fetchTokenInfoMultiChain(tokenAddress: string, chainIds: number[]): Promise<any> {
-  console.log(`🔍 Trying to fetch token ${tokenAddress} across ${chainIds.length} chain(s): ${chainIds.join(", ")}`);
+async function createWebhook(
+  name: string,
+  addresses: string[],
+  chainIds: number[],
+  tokenAddress: string | null = null
+) {
+  const url = "https://api.sim.dune.com/beta/evm/subscriptions/webhooks";
   
-  for (const chainId of chainIds) {
-    const tokenInfo = await fetchTokenInfo(tokenAddress, chainId);
-    if (tokenInfo) {
-      console.log(`✅ Found valid token on chain ${chainId}`);
-      return tokenInfo;
-    }
+  const payload: Record<string, unknown> = {
+    name: name,
+    url: `${WEBHOOK_BASE_URL}/activities`,
+    type: "activities",
+    addresses: addresses,
+    chain_ids: chainIds
+  };
+
+  // Add token_address filter if provided (for per-token whale tracking)
+  if (tokenAddress) {
+    payload.token_address = tokenAddress;
   }
+
+  const chainDisplay = chainIds.length === 1 ? `chain ${chainIds[0]}` : `${chainIds.length} chains`;
+  const tokenDisplay = tokenAddress ? ` for token ${tokenAddress.slice(0, 10)}...` : '';
+  console.log(`📤 Creating webhook with ${addresses.length} addresses on ${chainDisplay}${tokenDisplay}`);
   
-  console.warn(`⚠️  Token ${tokenAddress} not found on any of the subscribed chains`);
-  return null;
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "X-Sim-Api-Key": SIM_API_KEY,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`❌ Failed to create webhook: ${response.status}`);
+      console.error(`  Response: ${errorText}`);
+      return null;
+    }
+
+    const data = await response.json();
+    console.log(`✅ Webhook created: ${data.id}`);
+    return data;
+  } catch (error) {
+    console.error(`❌ Error creating webhook:`, error);
+    return null;
+  }
 }
 
-// --- Telegram Bot Helpers ---
+// ============== TELEGRAM HELPERS ==============
 
-/**
- * Add a subscriber to receive whale alerts
- */
-async function addSubscriber(chatId: string): Promise<void> {
+async function addSubscriber(chatId) {
   const key = ["telegram", "subscribers", chatId];
   await kv.set(key, { chat_id: chatId, subscribed_at: nowISO() });
   console.log(`➕ Added subscriber: ${chatId}`);
 }
 
-/**
- * Get all subscribers
- */
-async function getAllSubscribers(): Promise<string[]> {
-  const entries = kv.list<{ chat_id: string }>({ prefix: ["telegram", "subscribers"] });
-  const chatIds: string[] = [];
+async function getAllSubscribers() {
+  const entries = kv.list({ prefix: ["telegram", "subscribers"] });
+  const chatIds = [];
   for await (const entry of entries) {
     chatIds.push(entry.value.chat_id);
   }
   return chatIds;
 }
 
-/**
- * Sanitize text to ensure valid UTF-8 encoding for Telegram
- * Removes or replaces invalid characters while preserving emojis
- */
-function sanitizeForTelegram(text: string): string {
-  // Ensure text is a string
+function sanitizeForTelegram(text) {
   if (typeof text !== 'string') {
     text = String(text);
   }
-  
-  // Replace null bytes which are never valid
   text = text.replace(/\0/g, '');
-  
-  // Normalize unicode to ensure proper encoding (NFC = Canonical Composition)
   try {
     text = text.normalize('NFC');
   } catch (e) {
     console.warn("Failed to normalize text:", e);
   }
-  
-  // Remove control characters (except newlines, carriage returns, tabs)
-  // but KEEP emojis and other valid Unicode characters
-  // Control characters are U+0000 to U+001F and U+007F to U+009F
   // deno-lint-ignore no-control-regex
   text = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, '');
-  
   return text;
 }
 
-/**
- * Send a message to Telegram using the Bot API
- * @param text - The message text (supports Markdown)
- * @param chatId - The chat ID to send to
- */
-async function sendTelegramMessage(text: string, chatId: string): Promise<boolean> {
+async function sendTelegramMessage(text, chatId) {
   const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
   
   try {
-    // Sanitize text to ensure valid UTF-8 encoding
     const sanitizedText = sanitizeForTelegram(text);
-    
-    // Create request body with explicit UTF-8 encoding
     const telegramPayload = {
       chat_id: chatId,
       text: sanitizedText,
       parse_mode: "Markdown",
       disable_web_page_preview: true,
     };
-    
-    // Log payload before sending
+
     console.log("📤 Sending to Telegram:", telegramPayload);
-    
-    const requestBody = JSON.stringify(telegramPayload);
-    
+
     const response = await fetch(url, {
       method: "POST",
-      headers: { 
+      headers: {
         "Content-Type": "application/json; charset=utf-8",
       },
-      body: requestBody,
+      body: JSON.stringify(telegramPayload),
     });
-    
+
     if (!response.ok) {
       const errorText = await response.text();
       console.error(`❌ Telegram API error (${response.status}):`, errorText);
-      console.error(`   Original message length: ${text.length} chars`);
-      console.error(`   Sanitized message length: ${sanitizedText.length} chars`);
-      console.error(`   First 200 chars of sanitized message: ${sanitizedText.substring(0, 200)}`);
       
-      // Try fallback without Markdown if it's a parse error
-      if (errorText.includes("parse") || errorText.includes("Markdown") || errorText.includes("UTF-8")) {
-        console.log("⚠️  Retrying without Markdown formatting...");
-        
+      if (errorText.includes("parse") || errorText.includes("Markdown")) {
+        console.log("⚠️ Retrying without Markdown formatting...");
         const fallbackResponse = await fetch(url, {
           method: "POST",
-          headers: { 
+          headers: {
             "Content-Type": "application/json; charset=utf-8",
           },
           body: JSON.stringify({
             chat_id: chatId,
             text: sanitizedText,
-            // No parse_mode - send as plain text
             disable_web_page_preview: true,
           }),
         });
-        
+
         if (fallbackResponse.ok) {
           console.log(`✅ Telegram message sent (plain text fallback) to ${chatId}`);
           return true;
-        } else {
-          const fallbackError = await fallbackResponse.text();
-          console.error(`❌ Fallback also failed:`, fallbackError);
         }
       }
-      
       return false;
     }
-    
+
     console.log(`✅ Telegram message sent to ${chatId}`);
     return true;
   } catch (error) {
@@ -504,106 +347,48 @@ async function sendTelegramMessage(text: string, chatId: string): Promise<boolea
   }
 }
 
-/**
- * Broadcast a message to all subscribers
- */
-async function broadcastToSubscribers(text: string): Promise<void> {
+async function broadcastToSubscribers(text) {
   const subscribers = await getAllSubscribers();
-  
   if (subscribers.length === 0) {
-    console.warn("⚠️  No subscribers to send message to");
+    console.warn("⚠️ No subscribers to send message to");
     return;
   }
-  
   console.log(`📢 Broadcasting to ${subscribers.length} subscriber(s)`);
-  
   for (const chatId of subscribers) {
     await sendTelegramMessage(text, chatId);
   }
 }
 
-/**
- * Format a balance change into a Telegram message
- */
-// deno-lint-ignore no-explicit-any
-function formatBalanceChangeMessage(change: any, blockNumber?: number): string {
-  // Handle different field names from Sim API
-  const address = change?.subscribed_address || change?.address || "unknown";
-  const amount = change?.amount_delta || change?.amount || "0";
-  const tokenSymbol = change?.asset?.symbol || "unknown token";
-  
-  // Token address - prioritize asset.token_address per Sim API structure
-  const tokenAddress = change?.asset?.token_address || 
-                      change?.asset?.contract_address || 
-                      change?.asset?.address || 
-                      "unknown";
-  
-  const toAddress = change?.counterparty_address || change?.to || "";
-  const txHash = change?.transaction_hash || change?.tx_hash || "unknown";
-  const block = blockNumber || change?.block_number || change?.block || "unknown";
-  const direction = change?.direction || "unknown";
-  
-  // Format message based on direction (full addresses, no truncation)
-  if (direction === "out") {
-    const toMsg = toAddress ? ` to \`${toAddress}\`` : "";
-    return `🐋 Whale \`${address}\` sent *${amount}* ${tokenSymbol} ` +
-           `(token \`${tokenAddress}\`)${toMsg} ` +
-           `in tx \`${txHash}\` (block ${block}).`;
-  } else {
-    return `🐋 Whale \`${address}\` received *${amount}* ${tokenSymbol} ` +
-           `(token \`${tokenAddress}\`) ` +
-           `in tx \`${txHash}\` (block ${block}).`;
-  }
-}
-
-/**
- * Format an activity into a Telegram message (Whale Alert style)
- */
-function formatActivityMessage(
-  // deno-lint-ignore no-explicit-any
-  activity: any, 
-  tokenSymbol: string, 
-  _tokenName: string,
-  tokenPrice: number | null,
-  tokenDecimals: number,
-  chainId: number
-): string {
+function formatActivityMessage(activity, tokenSymbol, _tokenName, tokenPrice, tokenDecimals, chainId) {
   const type = activity?.type || "unknown";
   const rawValue = activity?.value || "0";
-  
-  // Adjust for decimals
   const actualAmount = parseFloat(rawValue) / Math.pow(10, tokenDecimals);
   const formattedAmount = formatNumber(actualAmount);
-  
   const symbol = tokenSymbol || "unknown token";
   const txHash = activity?.tx_hash || "unknown";
-  
-  // Calculate USD value using the actual amount
+
   let usdString = "";
   if (tokenPrice && tokenPrice > 0) {
     const usdValue = actualAmount * tokenPrice;
     usdString = ` ($${formatNumber(usdValue)})`;
   }
-  
-  // Generate explorer link
+
   const detailsLink = getExplorerLink(txHash, chainId);
-  
-  // Select emoji based on activity type (more emphatic like Whale Alert)
+
   let emoji = "🔔";
   switch (type) {
     case "send":
     case "receive": {
-      // Scale emoji count based on USD value (1-9)
       const usdValue = (tokenPrice && tokenPrice > 0) ? actualAmount * tokenPrice : 0;
-      let emojiCount = 1; // default
-      if (usdValue >= 500_000_000) emojiCount = 9;       // $500M+
-      else if (usdValue >= 100_000_000) emojiCount = 8;  // $100M+
-      else if (usdValue >= 50_000_000) emojiCount = 7;   // $50M+
-      else if (usdValue >= 10_000_000) emojiCount = 6;   // $10M+
-      else if (usdValue >= 5_000_000) emojiCount = 5;    // $5M+
-      else if (usdValue >= 1_000_000) emojiCount = 4;    // $1M+
-      else if (usdValue >= 500_000) emojiCount = 3;      // $500k+
-      else if (usdValue >= 100_000) emojiCount = 2;      // $100k+
+      let emojiCount = 1;
+      if (usdValue >= 500_000_000) emojiCount = 9;
+      else if (usdValue >= 100_000_000) emojiCount = 8;
+      else if (usdValue >= 50_000_000) emojiCount = 7;
+      else if (usdValue >= 10_000_000) emojiCount = 6;
+      else if (usdValue >= 5_000_000) emojiCount = 5;
+      else if (usdValue >= 1_000_000) emojiCount = 4;
+      else if (usdValue >= 500_000) emojiCount = 3;
+      else if (usdValue >= 100_000) emojiCount = 2;
       emoji = "🚨 ".repeat(emojiCount).trim();
       break;
     }
@@ -616,36 +401,387 @@ function formatActivityMessage(
     case "swap":
       emoji = "🔄 ".repeat(3).trim();
       break;
-    case "approve":
-      emoji = "✅ ".repeat(3).trim();
-      break;
   }
-  
-  // Format message based on activity type
+
   let message = "";
-  const from = activity?.from || activity?.tx_from || "unknown wallet";
-  const to = activity?.to || activity?.tx_to || "unknown wallet";
-  
-  // Create markdown links for addresses
+  const from = activity?.from || "unknown wallet";
+  const to = activity?.to || "unknown wallet";
+
   const fromLink = from !== "unknown wallet" ? `[${from}](${getAddressExplorerLink(from, chainId)})` : from;
   const toLink = to !== "unknown wallet" ? `[${to}](${getAddressExplorerLink(to, chainId)})` : to;
-  
+
   if (type === "mint") {
-    message = `${emoji}  ${formattedAmount} #${symbol}${usdString} minted at ${toLink}`;
+    message = `${emoji} ${formattedAmount} #${symbol}${usdString} minted at ${toLink}`;
   } else if (type === "burn") {
-    message = `${emoji}  ${formattedAmount} #${symbol}${usdString} burned at ${fromLink}`;
+    message = `${emoji} ${formattedAmount} #${symbol}${usdString} burned at ${fromLink}`;
   } else if (type === "send" || type === "receive") {
-    message = `${emoji}  ${formattedAmount} #${symbol}${usdString} transferred from ${fromLink} to ${toLink}`;
+    message = `${emoji} ${formattedAmount} #${symbol}${usdString} transferred from ${fromLink} to ${toLink}`;
   } else if (type === "swap") {
-    message = `${emoji}  ${formattedAmount} #${symbol}${usdString} swapped by ${fromLink}`;
+    message = `${emoji} ${formattedAmount} #${symbol}${usdString} swapped by ${fromLink}`;
   } else {
-    message = `${emoji}  ${formattedAmount} #${symbol}${usdString} ${type} from ${fromLink} to ${toLink}`;
+    message = `${emoji} ${formattedAmount} #${symbol}${usdString} ${type} from ${fromLink} to ${toLink}`;
   }
-  
+
   message += `\n\n[Tx Link](${detailsLink}) · Powered by [Sim APIs](https://sim.dune.com/)`;
-  
   return message;
 }
+
+// ============== SETUP FUNCTIONS ==============
+
+async function fetchAllWhales() {
+  console.log("🐋 Starting whale fetching process...");
+  
+  // Fetch the filtered tokens from GitHub Gist
+  console.log("📥 Fetching token list from GitHub Gist...");
+  const tokensUrl = "https://gist.githubusercontent.com/dericksozo/3ad9c3caab9c1a6e0603f804affcda24/raw/297ea8b8c1156fe3e499bdd148bff744445636b2/top_erc20_tokens_filtered.json";
+  const tokensResponse = await fetch(tokensUrl);
+  
+  if (!tokensResponse.ok) {
+    throw new Error(`Failed to fetch tokens from GitHub Gist: ${tokensResponse.status} ${tokensResponse.statusText}`);
+  }
+  
+  const tokens = await tokensResponse.json();
+  console.log(`✅ Fetched ${tokens.length} tokens from GitHub Gist`);
+  
+  console.log(`⏱️  Rate limit: 5 req/sec max, using 250ms delay between requests`);
+  console.log(`⏱️  Estimated time: ~${Math.ceil(tokens.length * 0.25 / 60)} minutes (${tokens.length} requests × 250ms)`);
+  
+  let totalWhales = 0;
+  let processedTokens = 0;
+  const results = [];
+
+  for (const token of tokens) {
+    const chainId = parseInt(token.chain_id);
+    const tokenAddress = token.contract_address;
+    const symbol = token.symbol;
+
+    console.log(`\n🔄 Processing ${symbol} on chain ${chainId}...`);
+
+    // Fetch token holders
+    const holdersData = await fetchTokenHolders(tokenAddress, chainId);
+    
+    if (holdersData && holdersData.holders && holdersData.holders.length > 0) {
+      const holders = holdersData.holders;
+      
+      // Store in KV: ["whales", chainId, tokenAddress] -> holders data
+      const key = ["whales", chainId.toString(), tokenAddress.toLowerCase()];
+      const value = {
+        token_address: tokenAddress,
+        chain_id: chainId,
+        symbol: symbol,
+        blockchain: token.blockchain,
+        holders: holders,
+        fetched_at: nowISO(),
+      };
+      
+      await kv.set(key, value);
+      
+      totalWhales += holders.length;
+      processedTokens++;
+      
+      results.push({
+        token: symbol,
+        chain_id: chainId,
+        holders_count: holders.length,
+        status: "success",
+      });
+      
+      console.log(`✅ Stored ${holders.length} whales for ${symbol}`);
+    } else {
+      results.push({
+        token: symbol,
+        chain_id: chainId,
+        holders_count: 0,
+        status: "failed",
+      });
+      console.log(`⚠️ Failed to fetch holders for ${symbol}`);
+    }
+
+    // Rate limiting: Sim APIs allows max 5 req/sec, we use 250ms (4 req/sec) to be safe
+    await rateLimitedDelay();
+  }
+
+  console.log(`\n✅ Whale fetching complete!`);
+  console.log(`   Processed: ${processedTokens}/${tokens.length} tokens`);
+  console.log(`   Total whales: ${totalWhales}`);
+
+  return {
+    total_tokens: tokens.length,
+    processed_tokens: processedTokens,
+    total_whales: totalWhales,
+    results: results,
+  };
+}
+
+async function createWebhooksForWhales() {
+  console.log("🪝 Starting per-token webhook creation process...");
+
+  // Count tokens first to show progress
+  let tokenCount = 0;
+  const tokensToProcess: Array<{
+    key: string[];
+    value: {
+      token_address: string;
+      chain_id: number;
+      symbol: string;
+      blockchain: string;
+      holders: Array<{ wallet_address: string; balance?: string }>;
+    };
+  }> = [];
+  
+  const entriesForCount = kv.list({ prefix: ["whales"] });
+  for await (const entry of entriesForCount) {
+    tokenCount++;
+    tokensToProcess.push({
+      key: entry.key as string[],
+      value: entry.value as {
+        token_address: string;
+        chain_id: number;
+        symbol: string;
+        blockchain: string;
+        holders: Array<{ wallet_address: string; balance?: string }>;
+      },
+    });
+  }
+
+  if (tokenCount === 0) {
+    console.error("❌ No whale data found. Run /setup/fetch-whales first.");
+    return {
+      success: false,
+      error: "No whale data found. Run /setup/fetch-whales first.",
+    };
+  }
+
+  console.log(`📊 Found ${tokenCount} tokens in KV store`);
+  console.log(`⏱️  Estimated time: ~${Math.ceil(tokenCount * 0.25 / 60)} minutes (${tokenCount} webhooks × 250ms)`);
+  console.log(`\n🚀 Creating individual webhooks for each token...\n`);
+
+  let webhooksCreated = 0;
+  let webhooksFailed = 0;
+  const webhookIds: string[] = [];
+  const results: Array<{
+    token: string;
+    chain_id: number;
+    webhook_id: string | null;
+    status: string;
+    addresses_count: number;
+  }> = [];
+
+  for (const { value: tokenData } of tokensToProcess) {
+    const { token_address, chain_id, symbol, blockchain, holders } = tokenData;
+
+    // Get top 3 holder addresses (or fewer if less available)
+    const topHolders = holders.slice(0, 3);
+    const holderAddresses = topHolders
+      .map(h => h.wallet_address)
+      .filter(addr => addr && addr.length > 0);
+
+    if (holderAddresses.length === 0) {
+      console.log(`⚠️ Skipping ${symbol} on ${blockchain} - no holder addresses found`);
+      results.push({
+        token: symbol,
+        chain_id: chain_id,
+        webhook_id: null,
+        status: "skipped_no_addresses",
+        addresses_count: 0,
+      });
+      webhooksFailed++;
+      continue;
+    }
+
+    // Create webhook name
+    const webhookName = `Whale Tracker - ${symbol} on ${blockchain}`;
+
+    console.log(`📤 [${webhooksCreated + webhooksFailed + 1}/${tokenCount}] Creating webhook for ${symbol} on ${blockchain}...`);
+    console.log(`   Token: ${token_address}`);
+    console.log(`   Chain: ${chain_id}`);
+    console.log(`   Top holders: ${holderAddresses.length}`);
+
+    // Create webhook with token_address filter
+    const webhook = await createWebhook(
+      webhookName,
+      holderAddresses,
+      [chain_id],        // Single chain
+      token_address      // Token filter
+    );
+
+    if (webhook && webhook.id) {
+      // Store webhook ID with full token metadata
+      const webhookKey = ["webhooks", "ids", webhook.id];
+      await kv.set(webhookKey, {
+        id: webhook.id,
+        name: webhookName,
+        token_address: token_address,
+        chain_id: chain_id,
+        symbol: symbol,
+        blockchain: blockchain,
+        holder_addresses: holderAddresses,
+        addresses_count: holderAddresses.length,
+        created_at: nowISO(),
+      });
+
+      // Also store a reverse lookup by token
+      const tokenWebhookKey = ["webhooks", "by_token", chain_id.toString(), token_address.toLowerCase()];
+      await kv.set(tokenWebhookKey, {
+        webhook_id: webhook.id,
+        symbol: symbol,
+      });
+
+      webhookIds.push(webhook.id);
+      webhooksCreated++;
+      results.push({
+        token: symbol,
+        chain_id: chain_id,
+        webhook_id: webhook.id,
+        status: "success",
+        addresses_count: holderAddresses.length,
+      });
+
+      console.log(`   ✅ Webhook created: ${webhook.id}\n`);
+    } else {
+      webhooksFailed++;
+      results.push({
+        token: symbol,
+        chain_id: chain_id,
+        webhook_id: null,
+        status: "failed",
+        addresses_count: holderAddresses.length,
+      });
+      console.log(`   ❌ Failed to create webhook\n`);
+    }
+
+    // Rate limiting: Sim APIs allows max 5 req/sec
+    await rateLimitedDelay();
+  }
+
+  console.log(`\n${"=".repeat(60)}`);
+  console.log(`✅ Webhook creation complete!`);
+  console.log(`   Created: ${webhooksCreated}/${tokenCount} webhooks`);
+  console.log(`   Failed: ${webhooksFailed}/${tokenCount}`);
+  console.log(`${"=".repeat(60)}\n`);
+
+  return {
+    success: webhooksCreated > 0,
+    webhooks_created: webhooksCreated,
+    webhooks_failed: webhooksFailed,
+    total_tokens: tokenCount,
+    webhook_ids: webhookIds,
+    results: results,
+  };
+}
+
+async function getSetupStatus() {
+  // Count tokens/whales
+  let tokenCount = 0;
+  let totalWhales = 0;
+  const entries = kv.list({ prefix: ["whales"] });
+  
+  for await (const entry of entries) {
+    tokenCount++;
+    const data = entry.value;
+    if (data.holders && Array.isArray(data.holders)) {
+      totalWhales += data.holders.length;
+    }
+  }
+
+  // Count webhooks
+  let webhookCount = 0;
+  const webhookEntries = kv.list({ prefix: ["webhooks", "ids"] });
+  const webhookIds = [];
+  
+  for await (const entry of webhookEntries) {
+    webhookCount++;
+    webhookIds.push(entry.value.id);
+  }
+
+  // Count subscribers
+  const subscribers = await getAllSubscribers();
+
+  return {
+    whales: {
+      tokens_processed: tokenCount,
+      total_whale_addresses: totalWhales,
+    },
+    webhooks: {
+      count: webhookCount,
+      ids: webhookIds,
+    },
+    telegram: {
+      subscribers_count: subscribers.length,
+    },
+    status: tokenCount > 0 && webhookCount > 0 ? "ready" : "incomplete",
+  };
+}
+
+async function getAllWhalesAsJson() {
+  console.log("📥 Retrieving all whale addresses from KV...");
+  
+  const uniqueAddresses = new Set();
+  const chainIds = new Set();
+  let tokenCount = 0;
+  
+  const entries = kv.list({ prefix: ["whales"] });
+  
+  for await (const entry of entries) {
+    const data = entry.value;
+    tokenCount++;
+    
+    if (data.chain_id) {
+      chainIds.add(data.chain_id);
+    }
+    
+    if (data.holders && Array.isArray(data.holders)) {
+      data.holders.forEach(holder => {
+        // API returns 'wallet_address' field
+        if (holder.wallet_address) {
+          uniqueAddresses.add(holder.wallet_address.toLowerCase());
+        }
+      });
+    }
+  }
+  
+  const addresses = Array.from(uniqueAddresses);
+  
+  console.log(`✅ Retrieved ${tokenCount} tokens with ${addresses.length} unique whale addresses across ${chainIds.size} chains`);
+  
+  return {
+    tokens_count: tokenCount,
+    unique_whale_addresses: addresses.length,
+    chains_count: chainIds.size,
+    chains: Array.from(chainIds).sort((a, b) => a - b),
+    addresses: addresses.sort(),
+  };
+}
+
+async function clearSetupData() {
+  console.log("🗑️ Clearing setup data...");
+  
+  let deletedWhales = 0;
+  let deletedWebhooks = 0;
+
+  // Delete whales
+  const whaleEntries = kv.list({ prefix: ["whales"] });
+  for await (const entry of whaleEntries) {
+    await kv.delete(entry.key);
+    deletedWhales++;
+  }
+
+  // Delete webhook IDs
+  const webhookEntries = kv.list({ prefix: ["webhooks", "ids"] });
+  for await (const entry of webhookEntries) {
+    await kv.delete(entry.key);
+    deletedWebhooks++;
+  }
+
+  console.log(`✅ Deleted ${deletedWhales} whale entries and ${deletedWebhooks} webhook entries`);
+
+  return {
+    deleted_whales: deletedWhales,
+    deleted_webhooks: deletedWebhooks,
+  };
+}
+
+// ============== HTTP SERVER ==============
 
 Deno.serve(async (req) => {
   const start = performance.now();
@@ -659,18 +795,265 @@ Deno.serve(async (req) => {
 
   const { pathname } = new URL(req.url);
 
-  // ---------- /health ----------
+  // ========== HEALTH CHECK ==========
   if (pathname === "/health" && req.method === "GET") {
     return new Response(
       JSON.stringify({ ok: true, status: "healthy", timestamp: nowISO() }),
-      { status: 200, headers: { "content-type": "application/json; charset=utf-8" } },
+      { status: 200, headers: { "content-type": "application/json; charset=utf-8" } }
     );
   }
 
-  // ---------- /telegram/webhook ----------
+  // ========== SETUP: FETCH WHALES ==========
+  if (pathname === "/setup/fetch-whales" && (req.method === "GET" || req.method === "POST")) {
+    console.log("🚀 Starting whale fetch process...");
+    try {
+      const result = await fetchAllWhales();
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          message: "Whale fetching complete",
+          ...result,
+          duration_ms: Math.round(performance.now() - start),
+        }, null, 2),
+        { status: 200, headers: { "content-type": "application/json; charset=utf-8" } }
+      );
+    } catch (error) {
+      console.error("❌ Error fetching whales:", error);
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: error.message,
+          duration_ms: Math.round(performance.now() - start),
+        }, null, 2),
+        { status: 500, headers: { "content-type": "application/json; charset=utf-8" } }
+      );
+    }
+  }
+
+  // ========== SETUP: CREATE WEBHOOKS ==========
+  if (pathname === "/setup/create-webhooks" && (req.method === "GET" || req.method === "POST")) {
+    console.log("🚀 Starting webhook creation...");
+    try {
+      const result = await createWebhooksForWhales();
+      return new Response(
+        JSON.stringify({
+          ok: result.success,
+          message: "Webhook creation complete",
+          ...result,
+          duration_ms: Math.round(performance.now() - start),
+        }, null, 2),
+        { status: 200, headers: { "content-type": "application/json; charset=utf-8" } }
+      );
+    } catch (error) {
+      console.error("❌ Error creating webhooks:", error);
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: error.message,
+          duration_ms: Math.round(performance.now() - start),
+        }, null, 2),
+        { status: 500, headers: { "content-type": "application/json; charset=utf-8" } }
+      );
+    }
+  }
+
+  // ========== SETUP: STATUS ==========
+  if (pathname === "/setup/status" && req.method === "GET") {
+    try {
+      const status = await getSetupStatus();
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          ...status,
+          duration_ms: Math.round(performance.now() - start),
+        }, null, 2),
+        { status: 200, headers: { "content-type": "application/json; charset=utf-8" } }
+      );
+    } catch (error) {
+      console.error("❌ Error getting status:", error);
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: error.message,
+        }, null, 2),
+        { status: 500, headers: { "content-type": "application/json; charset=utf-8" } }
+      );
+    }
+  }
+
+  // ========== SETUP: GET WHALES JSON ==========
+  if (pathname === "/setup/get-whales-json" && req.method === "GET") {
+    try {
+      const whalesData = await getAllWhalesAsJson();
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          ...whalesData,
+          duration_ms: Math.round(performance.now() - start),
+        }, null, 2),
+        { status: 200, headers: { "content-type": "application/json; charset=utf-8" } }
+      );
+    } catch (error) {
+      console.error("❌ Error getting whales:", error);
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: error.message,
+        }, null, 2),
+        { status: 500, headers: { "content-type": "application/json; charset=utf-8" } }
+      );
+    }
+  }
+
+  // ========== SETUP: TOP HOLDERS ==========
+  // Returns top 3 holders for each token in a structured format
+  if (pathname === "/setup/top-holders" && req.method === "GET") {
+    try {
+      console.log("📥 Retrieving top holders for all tokens...");
+      
+      const tokens: Array<{
+        symbol: string;
+        blockchain: string;
+        chain_id: number;
+        token_address: string;
+        top_holders: Array<{
+          rank: number;
+          address: string;
+          balance: string;
+        }>;
+        fetched_at: string;
+      }> = [];
+
+      const entries = kv.list({ prefix: ["whales"] });
+      for await (const entry of entries) {
+        const data = entry.value as {
+          token_address: string;
+          chain_id: number;
+          symbol: string;
+          blockchain: string;
+          holders: Array<{ wallet_address: string; balance?: string }>;
+          fetched_at: string;
+        };
+
+        const topHolders = data.holders.slice(0, 3).map((holder, index) => ({
+          rank: index + 1,
+          address: holder.wallet_address,
+          balance: holder.balance || "unknown",
+        }));
+
+        tokens.push({
+          symbol: data.symbol,
+          blockchain: data.blockchain,
+          chain_id: data.chain_id,
+          token_address: data.token_address,
+          top_holders: topHolders,
+          fetched_at: data.fetched_at,
+        });
+      }
+
+      // Sort by blockchain then symbol for readability
+      tokens.sort((a, b) => {
+        if (a.blockchain !== b.blockchain) {
+          return a.blockchain.localeCompare(b.blockchain);
+        }
+        return a.symbol.localeCompare(b.symbol);
+      });
+
+      console.log(`✅ Retrieved top holders for ${tokens.length} tokens`);
+
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          tokens_count: tokens.length,
+          total_holders: tokens.reduce((sum, t) => sum + t.top_holders.length, 0),
+          tokens: tokens,
+          duration_ms: Math.round(performance.now() - start),
+        }, null, 2),
+        { status: 200, headers: { "content-type": "application/json; charset=utf-8" } }
+      );
+    } catch (error) {
+      console.error("❌ Error getting top holders:", error);
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: error.message,
+        }, null, 2),
+        { status: 500, headers: { "content-type": "application/json; charset=utf-8" } }
+      );
+    }
+  }
+
+  // ========== SETUP: VIEW WEBHOOKS ==========
+  if (pathname === "/setup/view-webhooks" && req.method === "GET") {
+    try {
+      const url = "https://api.sim.dune.com/beta/evm/subscriptions/webhooks";
+      console.log("🔍 Fetching webhooks from Sim API...");
+      
+      const response = await fetch(url, {
+        method: "GET",
+        headers: {
+          "X-Sim-Api-Key": SIM_API_KEY,
+        },
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Failed to fetch webhooks: ${response.status} ${errorText}`);
+      }
+
+      const data = await response.json();
+      console.log(`✅ Retrieved ${data?.webhooks?.length || 0} webhook(s)`);
+
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          count: data?.webhooks?.length || 0,
+          webhooks: data.webhooks || [],
+          next_offset: data.next_offset || null,
+          duration_ms: Math.round(performance.now() - start),
+        }, null, 2),
+        { status: 200, headers: { "content-type": "application/json; charset=utf-8" } }
+      );
+    } catch (error) {
+      console.error("❌ Error fetching webhooks:", error);
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: error.message,
+        }, null, 2),
+        { status: 500, headers: { "content-type": "application/json; charset=utf-8" } }
+      );
+    }
+  }
+
+  // ========== SETUP: CLEAR DATA ==========
+  if (pathname === "/setup/clear" && (req.method === "GET" || req.method === "POST")) {
+    try {
+      const result = await clearSetupData();
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          message: "Setup data cleared",
+          ...result,
+          duration_ms: Math.round(performance.now() - start),
+        }, null, 2),
+        { status: 200, headers: { "content-type": "application/json; charset=utf-8" } }
+      );
+    } catch (error) {
+      console.error("❌ Error clearing data:", error);
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: error.message,
+        }, null, 2),
+        { status: 500, headers: { "content-type": "application/json; charset=utf-8" } }
+      );
+    }
+  }
+
+  // ========== TELEGRAM WEBHOOK ==========
   if (pathname === "/telegram/webhook" && req.method === "POST") {
-    // deno-lint-ignore no-explicit-any
-    let parsed: any;
+    let parsed;
     try {
       parsed = rawBody ? JSON.parse(rawBody) : undefined;
     } catch (err) {
@@ -678,7 +1061,6 @@ Deno.serve(async (req) => {
       return new Response("Invalid JSON", { status: 400 });
     }
 
-    // Handle incoming Telegram messages
     if (parsed?.message) {
       const chatId = parsed.message.chat.id?.toString();
       const text = parsed.message.text || "";
@@ -686,7 +1068,6 @@ Deno.serve(async (req) => {
 
       console.log(`📨 Telegram message from @${username} (${chatId}): ${text}`);
 
-      // Handle /start command - subscribe user
       if (text.startsWith("/start")) {
         await addSubscriber(chatId);
         await sendTelegramMessage(
@@ -697,20 +1078,16 @@ Deno.serve(async (req) => {
           "/status - Check subscription status",
           chatId
         );
-      } 
-      // Handle /status command
-      else if (text.startsWith("/status")) {
+      } else if (text.startsWith("/status")) {
         const subscribers = await getAllSubscribers();
         const isSubscribed = subscribers.includes(chatId);
         await sendTelegramMessage(
-          isSubscribed 
-            ? "✅ You're subscribed to whale alerts!" 
+          isSubscribed
+            ? "✅ You're subscribed to whale alerts!"
             : "❌ You're not subscribed. Send /start to subscribe.",
           chatId
         );
-      }
-      // Handle other messages
-      else {
+      } else {
         await sendTelegramMessage(
           "Send /start to subscribe to whale alerts!",
           chatId
@@ -724,19 +1101,18 @@ Deno.serve(async (req) => {
     });
   }
 
-  // ---------- /activities ----------
+  // ========== ACTIVITIES WEBHOOK ==========
   if (pathname === "/activities" && req.method === "GET") {
     return new Response(
       JSON.stringify({ ok: true, message: "POST webhook payloads to this endpoint." }),
-      { status: 200, headers: { "content-type": "application/json; charset=utf-8" } },
+      { status: 200, headers: { "content-type": "application/json; charset=utf-8" } }
     );
   }
 
   if (pathname === "/activities" && req.method === "POST") {
     await kvStoreRaw("activities", req, rawBody);
 
-    // deno-lint-ignore no-explicit-any
-    let parsed: any;
+    let parsed;
     try {
       parsed = rawBody ? JSON.parse(rawBody) : undefined;
     } catch (err) {
@@ -758,104 +1134,78 @@ Deno.serve(async (req) => {
     logActivitiesSummary(parsed);
 
     const activities = parsed.activities;
-    const counts: Record<string, number> = {};
-    
-    // Get webhook ID from headers (optional - for multi-chain fallback)
-    const webhookId = req.headers.get("dune-webhook-id") || 
-                      req.headers.get("sim-webhook-id") ||
-                      req.headers.get("x-webhook-id") ||
-                      req.headers.get("webhook-id");
-    
-    let webhookChainIds: number[] = [];
-    if (webhookId) {
-      const webhookMetadata = await fetchWebhookMetadata(webhookId);
-      if (webhookMetadata?.chain_ids && Array.isArray(webhookMetadata.chain_ids)) {
-        webhookChainIds = webhookMetadata.chain_ids;
-      }
-    }
-    
+    const counts = {};
+
     // Build transaction hash map for deduplication
-    // deno-lint-ignore no-explicit-any
-    const txHashMap = new Map<string, any[]>();
-    // deno-lint-ignore no-explicit-any
-    activities.forEach((activity: any) => {
+    const txHashMap = new Map();
+    activities.forEach((activity) => {
       const txHash = activity?.tx_hash;
       if (txHash) {
         if (!txHashMap.has(txHash)) {
           txHashMap.set(txHash, []);
         }
-        txHashMap.get(txHash)!.push(activity);
+        txHashMap.get(txHash).push(activity);
       }
     });
-    
+
     for (const activity of activities) {
       const t = activity?.type ?? "unknown";
       counts[t] = (counts[t] ?? 0) + 1;
-      
+
       // Filter: Only track send, swap, mint, burn
       if (!["send", "swap", "mint", "burn"].includes(t)) {
-        console.log(`ℹ️  Skipping activity type: ${t}`);
+        console.log(`ℹ️ Skipping activity type: ${t}`);
         continue;
       }
-      
-      // Deduplicate: Skip 'receive' if same tx has 'send' (whale-to-whale transfers)
+
+      // Deduplicate: Skip 'receive' if same tx has 'send'
       if (t === "receive") {
         const txHash = activity?.tx_hash;
         const txActivities = txHashMap.get(txHash) || [];
-        // deno-lint-ignore no-explicit-any
-        const hasSend = txActivities.some((a: any) => a.type === "send");
-        
+        const hasSend = txActivities.some((a) => a.type === "send");
         if (hasSend) {
-          console.log(`ℹ️  Skipping duplicate 'receive' for tx ${txHash} (already have 'send')`);
+          console.log(`ℹ️ Skipping duplicate 'receive' for tx ${txHash}`);
           continue;
         }
       }
-      
-      // Skip non-ERC20 activities or activities without token addresses
+
+      // Skip non-ERC20 activities
       if (activity?.asset_type !== "erc20" || !activity?.token_address) {
-        console.log(`ℹ️  Skipping activity: ${t} (asset_type: ${activity?.asset_type})`);
+        console.log(`ℹ️ Skipping activity: ${t} (asset_type: ${activity?.asset_type})`);
         continue;
       }
-      
+
       const tokenAddress = activity.token_address;
       const chainId = activity.chain_id || DEFAULT_CHAIN_ID;
-      
-      // Always fetch token info to get pricing data
+
+      // Fetch token info for pricing and metadata
       let tokenSymbol = "unknown";
       let tokenName = "unknown";
-      let tokenPrice: number | null = null;
-      let tokenDecimals = 18; // default for most ERC20 tokens
-      
+      let tokenPrice = null;
+      let tokenDecimals = 18;
+
       if (chainId && tokenAddress) {
         console.log(`🔍 Fetching token info for ${tokenAddress} on chain ${chainId}`);
         const tokenInfo = await fetchTokenInfo(tokenAddress, chainId);
         
-        if (tokenInfo && isValidTokenInfo(tokenInfo)) {
+        if (tokenInfo && tokenInfo.symbol && tokenInfo.name) {
           tokenSymbol = tokenInfo.symbol;
           tokenName = tokenInfo.name;
           tokenDecimals = tokenInfo.decimals || 18;
-          // Extract price from token info (check common price field names)
-          tokenPrice = tokenInfo.price_usd || tokenInfo.price || tokenInfo.priceUsd || null;
-          console.log(`✅ Got token: ${tokenSymbol} (${tokenName}) - Decimals: ${tokenDecimals} - Price: $${tokenPrice || 'N/A'}`);
-        } else if (webhookChainIds.length > 0) {
-          // Fallback: try other chains from webhook metadata
-          console.log(`⚠️  Token not found on chain ${chainId}, trying webhook chains`);
-          const otherChains = webhookChainIds.filter(id => id !== chainId);
-          if (otherChains.length > 0) {
-            const fallbackToken = await fetchTokenInfoMultiChain(tokenAddress, otherChains);
-            if (fallbackToken) {
-              tokenSymbol = fallbackToken.symbol;
-              tokenName = fallbackToken.name;
-              tokenDecimals = fallbackToken.decimals || 18;
-              tokenPrice = fallbackToken.price_usd || fallbackToken.price || fallbackToken.priceUsd || null;
-              console.log(`✅ Found token on different chain: ${tokenSymbol} - Decimals: ${tokenDecimals} - Price: $${tokenPrice || 'N/A'}`);
-            }
-          }
+          tokenPrice = tokenInfo.price_usd || tokenInfo.price || null;
+          console.log(`✅ Got token: ${tokenSymbol} (${tokenName}) - Price: $${tokenPrice || 'N/A'}`);
         }
       }
-      
-      // Format and broadcast Telegram message with price and chain info
-      const message = formatActivityMessage(activity, tokenSymbol, tokenName, tokenPrice, tokenDecimals, chainId);
+
+      // Format and broadcast Telegram message
+      const message = formatActivityMessage(
+        activity,
+        tokenSymbol,
+        tokenName,
+        tokenPrice,
+        tokenDecimals,
+        chainId
+      );
       await broadcastToSubscribers(message);
     }
 
@@ -867,185 +1217,11 @@ Deno.serve(async (req) => {
         received_at: nowISO(),
         duration_ms: Math.round(performance.now() - start),
       }, null, 2),
-      { status: 200, headers: { "content-type": "application/json; charset=utf-8" } },
+      { status: 200, headers: { "content-type": "application/json; charset=utf-8" } }
     );
   }
 
-  // ---------- /transactions ----------
-  if (pathname === "/transactions" && req.method === "GET") {
-    return new Response(
-      JSON.stringify({ ok: true, message: "POST transaction payloads to this endpoint." }),
-      { status: 200, headers: { "content-type": "application/json; charset=utf-8" } },
-    );
-  }
-
-  if (pathname === "/transactions" && req.method === "POST") {
-    await kvStoreRaw("transactions", req, rawBody);
-
-    // deno-lint-ignore no-explicit-any
-    let parsed: any;
-    try {
-      parsed = rawBody ? JSON.parse(rawBody) : undefined;
-    } catch (err) {
-      console.error("JSON parse error:", err);
-      return new Response("Invalid JSON body", {
-        status: 400,
-        headers: { "content-type": "text/plain; charset=utf-8" },
-      });
-    }
-
-    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.transactions)) {
-      console.warn("Validation failed: expected { transactions: [] }");
-      return new Response("Body must be an object with a 'transactions' array.", {
-        status: 422,
-        headers: { "content-type": "text/plain; charset=utf-8" },
-      });
-    }
-
-    logTransactionsSummary(parsed);
-
-    const txs = parsed.transactions;
-    const typeCounts: Record<string, number> = {};
-    const successCounts: Record<string, number> = { true: 0, false: 0 };
-    for (const tx of txs) {
-      const ttype = tx?.transaction_type ?? "unknown";
-      typeCounts[ttype] = (typeCounts[ttype] ?? 0) + 1;
-      const success = Boolean(tx?.success);
-      successCounts[String(success)] = (successCounts[String(success)] ?? 0) + 1;
-    }
-
-    // TODO: Process whale transactions and send to Telegram (later step)
-
-    return new Response(
-      JSON.stringify({
-        ok: true,
-        received: txs.length,
-        type_counts: typeCounts,
-        success_counts: successCounts,
-        received_at: nowISO(),
-        duration_ms: Math.round(performance.now() - start),
-      }, null, 2),
-      { status: 200, headers: { "content-type": "application/json; charset=utf-8" } },
-    );
-  }
-
-  // ---------- /balances ----------
-  if (pathname === "/balances" && req.method === "GET") {
-    return new Response(
-      JSON.stringify({ ok: true, message: "POST balance change payloads to this endpoint." }),
-      { status: 200, headers: { "content-type": "application/json; charset=utf-8" } },
-    );
-  }
-
-  if (pathname === "/balances" && req.method === "POST") {
-    await kvStoreRaw("balances", req, rawBody);
-
-    // deno-lint-ignore no-explicit-any
-    let parsed: any;
-    try {
-      parsed = rawBody ? JSON.parse(rawBody) : undefined;
-    } catch (err) {
-      console.error("JSON parse error:", err);
-      return new Response("Invalid JSON body", {
-        status: 400,
-        headers: { "content-type": "text/plain; charset=utf-8" },
-      });
-    }
-
-    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.balance_changes)) {
-      console.warn("Validation failed: expected { balance_changes: [] }");
-      return new Response("Body must be an object with a 'balance_changes' array.", {
-        status: 422,
-        headers: { "content-type": "text/plain; charset=utf-8" },
-      });
-    }
-
-    logBalancesSummary(parsed);
-
-    const changes = parsed.balance_changes;
-    const blockNumber = parsed.block_number; // Extract from top-level payload
-    
-    // Get webhook ID from headers to fetch chain_ids
-    const webhookId = req.headers.get("dune-webhook-id") || 
-                      req.headers.get("sim-webhook-id") ||
-                      req.headers.get("x-webhook-id") ||
-                      req.headers.get("webhook-id");
-    
-    let webhookChainIds: number[] = [];
-    if (webhookId) {
-      console.log(`📍 Webhook ID found: ${webhookId}`);
-      const webhookMetadata = await fetchWebhookMetadata(webhookId);
-      if (webhookMetadata?.chain_ids && Array.isArray(webhookMetadata.chain_ids)) {
-        webhookChainIds = webhookMetadata.chain_ids;
-      }
-    } else {
-      console.warn(`⚠️  No webhook ID in headers - will use default chain`);
-    }
-    
-    const directionCounts: Record<string, number> = { in: 0, out: 0 };
-    const assetSymbols = new Set<string>();
-    
-    for (const change of changes) {
-      const dir = change?.direction ?? "unknown";
-      directionCounts[dir] = (directionCounts[dir] ?? 0) + 1;
-      
-      // Extract token address - it's in asset.token_address per the Sim API structure
-      const tokenAddress = change?.asset?.token_address || 
-                          change?.asset?.contract_address || 
-                          change?.asset?.address || 
-                          change?.contract_address ||
-                          change?.token_address;
-      
-      // Check if token info is missing and fetch it if needed
-      const needsTokenInfo = !change?.asset?.symbol || change?.asset?.symbol === null;
-      
-      if (needsTokenInfo && tokenAddress) {
-        // Use webhook chain_ids or fallback to default
-        const chainsToTry = webhookChainIds.length > 0 ? webhookChainIds : [DEFAULT_CHAIN_ID];
-        
-        console.log(`🔍 Token info missing for ${tokenAddress}`);
-        const tokenInfo = await fetchTokenInfoMultiChain(tokenAddress, chainsToTry);
-        
-        if (tokenInfo) {
-          // Enrich the change object with fetched token info
-          if (!change.asset) change.asset = {};
-          change.asset.symbol = tokenInfo.symbol;
-          change.asset.name = tokenInfo.name;
-          change.asset.decimals = tokenInfo.decimals;
-          change.asset.token_address = tokenAddress;
-          console.log(`✅ Enriched with: ${tokenInfo.symbol} (${tokenInfo.name}) on chain ${tokenInfo.chain_id}`);
-        } else {
-          console.warn(`⚠️  Could not fetch token info for ${tokenAddress} on any chain`);
-        }
-      } else if (!tokenAddress) {
-        console.warn(`⚠️  No token address found in balance change`);
-      } else if (!needsTokenInfo) {
-        console.log(`ℹ️  Token info already present: ${change?.asset?.symbol}`);
-      }
-      
-      if (change?.asset?.symbol) {
-        assetSymbols.add(change.asset.symbol);
-      }
-      
-      // Broadcast Telegram notification to all subscribers with block number from payload
-      const message = formatBalanceChangeMessage(change, blockNumber);
-      await broadcastToSubscribers(message);
-    }
-
-    return new Response(
-      JSON.stringify({
-        ok: true,
-        received: changes.length,
-        direction_counts: directionCounts,
-        unique_assets: assetSymbols.size,
-        received_at: nowISO(),
-        duration_ms: Math.round(performance.now() - start),
-      }, null, 2),
-      { status: 200, headers: { "content-type": "application/json; charset=utf-8" } },
-    );
-  }
-
-  // ---------- Fallback ----------
+  // ========== FALLBACK ==========
   return new Response("Not Found", {
     status: 404,
     headers: { "content-type": "text/plain; charset=utf-8" },

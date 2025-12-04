@@ -262,6 +262,41 @@ async function createWebhook(
   }
 }
 
+/**
+ * Update a webhook's active status (pause/resume)
+ * Docs: https://docs.sim.dune.com/evm/subscriptions/update-webhook
+ */
+async function updateWebhookActive(webhookId: string, active: boolean) {
+  const url = `https://api.sim.dune.com/beta/evm/subscriptions/webhooks/${webhookId}`;
+  
+  console.log(`${active ? '▶️' : '⏸️'} ${active ? 'Resuming' : 'Pausing'} webhook: ${webhookId}`);
+  
+  try {
+    const response = await fetch(url, {
+      method: "PATCH",
+      headers: {
+        "X-Sim-Api-Key": SIM_API_KEY,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ active }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`❌ Failed to update webhook ${webhookId}: ${response.status}`);
+      console.error(`  Response: ${errorText}`);
+      return null;
+    }
+
+    const data = await response.json();
+    console.log(`✅ Webhook ${webhookId} ${active ? 'resumed' : 'paused'}`);
+    return data;
+  } catch (error) {
+    console.error(`❌ Error updating webhook ${webhookId}:`, error);
+    return null;
+  }
+}
+
 // ============== TELEGRAM HELPERS ==============
 
 async function addSubscriber(chatId) {
@@ -500,7 +535,7 @@ function formatBalanceMessage(balanceChange: {
     message += `To: ${counterpartyLink}`;
   }
   
-  message += `\n\n[Tx Link](${detailsLink}) · Powered by [Sim APIs](https://sim.dune.com/)`;
+  message += `\n\n[Tx Link](${detailsLink}) · Powered by Dune's [Sim APIs](https://sim.dune.com/)`;
   return message;
 }
 
@@ -1098,6 +1133,152 @@ Deno.serve(async (req) => {
         JSON.stringify({
           ok: false,
           error: error.message,
+        }, null, 2),
+        { status: 500, headers: { "content-type": "application/json; charset=utf-8" } }
+      );
+    }
+  }
+
+  // ========== SETUP: PAUSE WEBHOOKS ==========
+  // Pause all webhooks (set active: false)
+  if (pathname === "/setup/pause-webhooks" && (req.method === "GET" || req.method === "POST")) {
+    try {
+      console.log("⏸️ Pausing all webhooks...");
+      
+      // First, fetch all webhooks from Sim API
+      const listUrl = "https://api.sim.dune.com/beta/evm/subscriptions/webhooks";
+      const listResponse = await fetch(listUrl, {
+        method: "GET",
+        headers: { "X-Sim-Api-Key": SIM_API_KEY },
+      });
+
+      if (!listResponse.ok) {
+        const errorText = await listResponse.text();
+        throw new Error(`Failed to fetch webhooks: ${listResponse.status} ${errorText}`);
+      }
+
+      const listData = await listResponse.json();
+      const webhooks = listData.webhooks || [];
+      
+      console.log(`📊 Found ${webhooks.length} webhook(s) to pause`);
+
+      let paused = 0;
+      let failed = 0;
+      const results: Array<{ id: string; status: string }> = [];
+
+      for (const webhook of webhooks) {
+        if (!webhook.active) {
+          console.log(`  ℹ️ Webhook ${webhook.id} already paused, skipping`);
+          results.push({ id: webhook.id, status: "already_paused" });
+          continue;
+        }
+
+        const result = await updateWebhookActive(webhook.id, false);
+        if (result) {
+          paused++;
+          results.push({ id: webhook.id, status: "paused" });
+        } else {
+          failed++;
+          results.push({ id: webhook.id, status: "failed" });
+        }
+        
+        // Rate limiting
+        await rateLimitedDelay();
+      }
+
+      console.log(`\n✅ Pause complete: ${paused} paused, ${failed} failed`);
+
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          message: "Webhooks paused",
+          total: webhooks.length,
+          paused: paused,
+          failed: failed,
+          results: results,
+          duration_ms: Math.round(performance.now() - start),
+        }, null, 2),
+        { status: 200, headers: { "content-type": "application/json; charset=utf-8" } }
+      );
+    } catch (error) {
+      console.error("❌ Error pausing webhooks:", error);
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: (error as Error).message,
+        }, null, 2),
+        { status: 500, headers: { "content-type": "application/json; charset=utf-8" } }
+      );
+    }
+  }
+
+  // ========== SETUP: RESUME WEBHOOKS ==========
+  // Resume all webhooks (set active: true)
+  if (pathname === "/setup/resume-webhooks" && (req.method === "GET" || req.method === "POST")) {
+    try {
+      console.log("▶️ Resuming all webhooks...");
+      
+      // First, fetch all webhooks from Sim API
+      const listUrl = "https://api.sim.dune.com/beta/evm/subscriptions/webhooks";
+      const listResponse = await fetch(listUrl, {
+        method: "GET",
+        headers: { "X-Sim-Api-Key": SIM_API_KEY },
+      });
+
+      if (!listResponse.ok) {
+        const errorText = await listResponse.text();
+        throw new Error(`Failed to fetch webhooks: ${listResponse.status} ${errorText}`);
+      }
+
+      const listData = await listResponse.json();
+      const webhooks = listData.webhooks || [];
+      
+      console.log(`📊 Found ${webhooks.length} webhook(s) to resume`);
+
+      let resumed = 0;
+      let failed = 0;
+      const results: Array<{ id: string; status: string }> = [];
+
+      for (const webhook of webhooks) {
+        if (webhook.active) {
+          console.log(`  ℹ️ Webhook ${webhook.id} already active, skipping`);
+          results.push({ id: webhook.id, status: "already_active" });
+          continue;
+        }
+
+        const result = await updateWebhookActive(webhook.id, true);
+        if (result) {
+          resumed++;
+          results.push({ id: webhook.id, status: "resumed" });
+        } else {
+          failed++;
+          results.push({ id: webhook.id, status: "failed" });
+        }
+        
+        // Rate limiting
+        await rateLimitedDelay();
+      }
+
+      console.log(`\n✅ Resume complete: ${resumed} resumed, ${failed} failed`);
+
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          message: "Webhooks resumed",
+          total: webhooks.length,
+          resumed: resumed,
+          failed: failed,
+          results: results,
+          duration_ms: Math.round(performance.now() - start),
+        }, null, 2),
+        { status: 200, headers: { "content-type": "application/json; charset=utf-8" } }
+      );
+    } catch (error) {
+      console.error("❌ Error resuming webhooks:", error);
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: (error as Error).message,
         }, null, 2),
         { status: 500, headers: { "content-type": "application/json; charset=utf-8" } }
       );

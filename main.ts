@@ -230,7 +230,6 @@ async function createWebhook(
   // Note: balances type supports token_address filter for ERC20 tracking
   if (tokenAddress) {
     payload.token_address = tokenAddress;
-    payload.asset_type = "erc20";
   }
 
   const chainDisplay = chainIds.length === 1 ? `chain ${chainIds[0]}` : `${chainIds.length} chains`;

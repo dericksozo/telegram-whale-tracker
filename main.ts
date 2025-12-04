@@ -218,15 +218,17 @@ async function createWebhook(
   
   const payload: Record<string, unknown> = {
     name: name,
-    url: `${WEBHOOK_BASE_URL}/activities`,
-    type: "activities",
+    url: `${WEBHOOK_BASE_URL}/balances`,
+    type: "balances",
     addresses: addresses,
     chain_ids: chainIds
   };
 
   // Add token_address filter if provided (for per-token whale tracking)
+  // Note: balances type supports token_address filter for ERC20 tracking
   if (tokenAddress) {
     payload.token_address = tokenAddress;
+    payload.asset_type = "erc20";
   }
 
   const chainDisplay = chainIds.length === 1 ? `chain ${chainIds[0]}` : `${chainIds.length} chains`;
@@ -422,6 +424,81 @@ function formatActivityMessage(activity, tokenSymbol, _tokenName, tokenPrice, to
     message = `${emoji} ${formattedAmount} #${symbol}${usdString} ${type} from ${fromLink} to ${toLink}`;
   }
 
+  message += `\n\n[Tx Link](${detailsLink}) · Powered by [Sim APIs](https://sim.dune.com/)`;
+  return message;
+}
+
+/**
+ * Format a balance change into a Telegram message
+ * Used for the balances webhook type which includes USD values directly
+ */
+function formatBalanceMessage(balanceChange: {
+  amount_delta: string;
+  direction: "in" | "out";
+  value_delta_usd: number;
+  price_usd?: number;
+  asset: {
+    symbol: string;
+    name?: string;
+    decimals: number;
+    token_address: string;
+  };
+  subscribed_address: string;
+  counterparty_address?: string;
+  transaction_hash: string;
+}, chainId: number) {
+  const direction = balanceChange.direction;
+  const usdValue = balanceChange.value_delta_usd || 0;
+  const symbol = balanceChange.asset?.symbol || "unknown";
+  const decimals = balanceChange.asset?.decimals || 18;
+  const txHash = balanceChange.transaction_hash || "unknown";
+  
+  // Calculate token amount from delta
+  const rawAmount = balanceChange.amount_delta || "0";
+  const actualAmount = parseFloat(rawAmount) / Math.pow(10, decimals);
+  const formattedAmount = formatNumber(actualAmount);
+  const formattedUsd = formatNumber(usdValue);
+  
+  // Determine emoji count based on USD value
+  let emojiCount = 1;
+  if (usdValue >= 500_000_000) emojiCount = 9;
+  else if (usdValue >= 100_000_000) emojiCount = 8;
+  else if (usdValue >= 50_000_000) emojiCount = 7;
+  else if (usdValue >= 10_000_000) emojiCount = 6;
+  else if (usdValue >= 5_000_000) emojiCount = 5;
+  else if (usdValue >= 1_000_000) emojiCount = 4;
+  else if (usdValue >= 500_000) emojiCount = 3;
+  else if (usdValue >= 100_000) emojiCount = 2;
+  const emoji = "🚨 ".repeat(emojiCount).trim();
+  
+  // Direction indicator
+  const directionText = direction === "in" ? "moved IN" : "moved OUT";
+  const directionEmoji = direction === "in" ? "📥" : "📤";
+  
+  // Format addresses with explorer links
+  const whaleAddress = balanceChange.subscribed_address || "unknown";
+  const counterparty = balanceChange.counterparty_address || "unknown";
+  
+  const whaleLink = whaleAddress !== "unknown" 
+    ? `[${whaleAddress.slice(0, 6)}...${whaleAddress.slice(-4)}](${getAddressExplorerLink(whaleAddress, chainId)})` 
+    : whaleAddress;
+  const counterpartyLink = counterparty !== "unknown" 
+    ? `[${counterparty.slice(0, 6)}...${counterparty.slice(-4)}](${getAddressExplorerLink(counterparty, chainId)})` 
+    : counterparty;
+  
+  const detailsLink = getExplorerLink(txHash, chainId);
+  
+  // Build message
+  let message = `${emoji} ${directionEmoji} ${formattedAmount} #${symbol} ($${formattedUsd}) ${directionText}\n\n`;
+  
+  if (direction === "in") {
+    message += `To: ${whaleLink}\n`;
+    message += `From: ${counterpartyLink}`;
+  } else {
+    message += `From: ${whaleLink}\n`;
+    message += `To: ${counterpartyLink}`;
+  }
+  
   message += `\n\n[Tx Link](${detailsLink}) · Powered by [Sim APIs](https://sim.dune.com/)`;
   return message;
 }
@@ -1099,6 +1176,129 @@ Deno.serve(async (req) => {
       status: 200,
       headers: { "content-type": "application/json; charset=utf-8" },
     });
+  }
+
+  // ========== BALANCES WEBHOOK ==========
+  if (pathname === "/balances" && req.method === "GET") {
+    return new Response(
+      JSON.stringify({ ok: true, message: "POST balance webhook payloads to this endpoint." }),
+      { status: 200, headers: { "content-type": "application/json; charset=utf-8" } }
+    );
+  }
+
+  if (pathname === "/balances" && req.method === "POST") {
+    await kvStoreRaw("balances", req, rawBody);
+
+    let parsed: { balance_changes?: Array<{
+      amount_delta: string;
+      direction: "in" | "out";
+      value_delta_usd: number;
+      price_usd?: number;
+      asset: {
+        symbol: string;
+        name?: string;
+        decimals: number;
+        token_address: string;
+      };
+      subscribed_address: string;
+      counterparty_address?: string;
+      transaction_hash: string;
+    }> } | undefined;
+    
+    try {
+      parsed = rawBody ? JSON.parse(rawBody) : undefined;
+    } catch (err) {
+      console.error("JSON parse error:", err);
+      return new Response("Invalid JSON body", {
+        status: 400,
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      });
+    }
+
+    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.balance_changes)) {
+      console.warn("Validation failed: expected { balance_changes: [] }");
+      return new Response("Body must be an object with a 'balance_changes' array.", {
+        status: 422,
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      });
+    }
+
+    console.log("\n========== BALANCE CHANGES PAYLOAD ==========");
+    console.log(JSON.stringify(parsed, null, 2));
+    console.log("==============================================\n");
+
+    const balanceChanges = parsed.balance_changes;
+    console.log(`📊 Received ${balanceChanges.length} balance change(s) @ ${nowISO()}`);
+
+    // Get chain_id from webhook headers
+    const chainIdHeader = req.headers.get("dune-webhook-chain-id");
+    const chainId = chainIdHeader ? parseInt(chainIdHeader) : DEFAULT_CHAIN_ID;
+
+    // Build transaction hash map for deduplication
+    const txHashMap = new Map<string, typeof balanceChanges>();
+    balanceChanges.forEach((change) => {
+      const txHash = change?.transaction_hash;
+      if (txHash) {
+        if (!txHashMap.has(txHash)) {
+          txHashMap.set(txHash, []);
+        }
+        txHashMap.get(txHash)!.push(change);
+      }
+    });
+
+    let processedCount = 0;
+    const processedTxHashes = new Set<string>();
+
+    for (const change of balanceChanges) {
+      const txHash = change?.transaction_hash;
+      const symbol = change?.asset?.symbol || "unknown";
+      const direction = change?.direction || "unknown";
+      const usdValue = change?.value_delta_usd || 0;
+
+      console.log(`\n[Balance Change]`);
+      console.log(`  Token: ${symbol}`);
+      console.log(`  Direction: ${direction}`);
+      console.log(`  USD Value: $${formatNumber(usdValue)}`);
+      console.log(`  Whale: ${change?.subscribed_address}`);
+      console.log(`  Counterparty: ${change?.counterparty_address}`);
+      console.log(`  Tx: ${txHash}`);
+
+      // Deduplicate: Only process one change per transaction hash
+      // (A single tx might cause multiple balance changes for the same token)
+      if (txHash && processedTxHashes.has(txHash)) {
+        console.log(`  ℹ️ Skipping duplicate tx hash: ${txHash}`);
+        continue;
+      }
+
+      // Skip very small balance changes (dust)
+      if (usdValue < 100) {
+        console.log(`  ℹ️ Skipping small balance change: $${formatNumber(usdValue)}`);
+        continue;
+      }
+
+      // Mark this tx as processed
+      if (txHash) {
+        processedTxHashes.add(txHash);
+      }
+
+      // Format and broadcast Telegram message
+      const message = formatBalanceMessage(change, chainId);
+      await broadcastToSubscribers(message);
+      processedCount++;
+    }
+
+    console.log(`\n✅ Processed ${processedCount} balance change notification(s)`);
+
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        received: balanceChanges.length,
+        processed: processedCount,
+        received_at: nowISO(),
+        duration_ms: Math.round(performance.now() - start),
+      }, null, 2),
+      { status: 200, headers: { "content-type": "application/json; charset=utf-8" } }
+    );
   }
 
   // ========== ACTIVITIES WEBHOOK ==========

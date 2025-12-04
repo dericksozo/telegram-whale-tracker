@@ -12,10 +12,10 @@ const _TELEGRAM_CHAT_ID = Deno.env.get("TELEGRAM_CHAT_ID") || "";
 const DEFAULT_CHAIN_ID = parseInt(Deno.env.get("DEFAULT_CHAIN_ID") || "1");
 
 // Webhook configuration
-const WEBHOOK_BASE_URL = Deno.env.get("WEBHOOK_BASE_URL") || "https://sim-whale-tracker--subscriptions-setup.deno.dev";
+const WEBHOOK_BASE_URL = Deno.env.get("WEBHOOK_BASE_URL") || "https://sim-whale-tracker.deno.dev";
 
-// How many top holders to fetch per token (default: 20)
-const TOP_HOLDERS_LIMIT = parseInt(Deno.env.get("TOP_HOLDERS_LIMIT") || "20");
+// How many top holders to fetch per token (default: 3 for whale tracking)
+const TOP_HOLDERS_LIMIT = parseInt(Deno.env.get("TOP_HOLDERS_LIMIT") || "3");
 
 // Rate limiting: Sim APIs allows maximum 5 requests per second
 // We use 250ms delay (4 req/sec) to be safe and account for request processing time
@@ -208,10 +208,15 @@ async function fetchTokenInfo(tokenAddress, chainId) {
   }
 }
 
-async function createWebhook(name, addresses, chainIds) {
+async function createWebhook(
+  name: string,
+  addresses: string[],
+  chainIds: number[],
+  tokenAddress: string | null = null
+) {
   const url = "https://api.sim.dune.com/beta/evm/subscriptions/webhooks";
   
-  const payload = {
+  const payload: Record<string, unknown> = {
     name: name,
     url: `${WEBHOOK_BASE_URL}/activities`,
     type: "activities",
@@ -219,7 +224,14 @@ async function createWebhook(name, addresses, chainIds) {
     chain_ids: chainIds
   };
 
-  console.log(`📤 Creating webhook with ${addresses.length} addresses on ${chainIds.length} chains`);
+  // Add token_address filter if provided (for per-token whale tracking)
+  if (tokenAddress) {
+    payload.token_address = tokenAddress;
+  }
+
+  const chainDisplay = chainIds.length === 1 ? `chain ${chainIds[0]}` : `${chainIds.length} chains`;
+  const tokenDisplay = tokenAddress ? ` for token ${tokenAddress.slice(0, 10)}...` : '';
+  console.log(`📤 Creating webhook with ${addresses.length} addresses on ${chainDisplay}${tokenDisplay}`);
   
   try {
     const response = await fetch(url, {
@@ -502,66 +514,160 @@ async function fetchAllWhales() {
 }
 
 async function createWebhooksForWhales() {
-  console.log("🪝 Starting webhook creation process...");
+  console.log("🪝 Starting per-token webhook creation process...");
 
-  // Get whale data directly from KV
-  console.log("📥 Retrieving whale data from KV...");
-  const whalesData = await getAllWhalesAsJson();
-  
-  if (!whalesData.addresses || whalesData.addresses.length === 0) {
-    console.error("❌ No whale addresses found. Run /setup/fetch-whales first.");
-    return {
-      success: false,
-      error: "No whale addresses found",
+  // Count tokens first to show progress
+  let tokenCount = 0;
+  const tokensToProcess: Array<{
+    key: string[];
+    value: {
+      token_address: string;
+      chain_id: number;
+      symbol: string;
+      blockchain: string;
+      holders: Array<{ wallet_address: string; balance?: string }>;
     };
-  }
-
-  const addresses = whalesData.addresses;
-  const chains = whalesData.chains;
-  const tokenCount = whalesData.tokens_count;
-
-  console.log(`📊 Statistics:`);
-  console.log(`   Tokens: ${tokenCount}`);
-  console.log(`   Unique whale addresses: ${addresses.length}`);
-  console.log(`   Chains: ${chains.length}`);
-
-  // Create a single webhook with ALL addresses (no batching)
-  console.log(`📦 Creating single webhook with all ${addresses.length} addresses...`);
+  }> = [];
   
-  const name = "Whale Tracker - All Chains";
-  const webhook = await createWebhook(name, addresses, chains);
-  
-  if (webhook && webhook.id) {
-    // Store webhook ID in KV
-    const key = ["webhooks", "ids", webhook.id];
-    await kv.set(key, {
-      id: webhook.id,
-      name: name,
-      addresses_count: addresses.length,
-      chain_ids: chains,
-      created_at: nowISO(),
+  const entriesForCount = kv.list({ prefix: ["whales"] });
+  for await (const entry of entriesForCount) {
+    tokenCount++;
+    tokensToProcess.push({
+      key: entry.key as string[],
+      value: entry.value as {
+        token_address: string;
+        chain_id: number;
+        symbol: string;
+        blockchain: string;
+        holders: Array<{ wallet_address: string; balance?: string }>;
+      },
     });
-    
-    console.log(`✅ Webhook created successfully: ${webhook.id}`);
-    console.log(`   Monitoring ${addresses.length} addresses across ${chains.length} chains`);
-    
-    return {
-      success: true,
-      webhooks_created: 1,
-      webhook_ids: [webhook.id],
-      webhook_id: webhook.id,
-      total_addresses: addresses.length,
-      chains: chains,
-    };
-  } else {
-    console.error(`❌ Failed to create webhook`);
+  }
+
+  if (tokenCount === 0) {
+    console.error("❌ No whale data found. Run /setup/fetch-whales first.");
     return {
       success: false,
-      error: "Webhook creation failed",
-      webhooks_created: 0,
-      webhook_ids: [],
+      error: "No whale data found. Run /setup/fetch-whales first.",
     };
   }
+
+  console.log(`📊 Found ${tokenCount} tokens in KV store`);
+  console.log(`⏱️  Estimated time: ~${Math.ceil(tokenCount * 0.25 / 60)} minutes (${tokenCount} webhooks × 250ms)`);
+  console.log(`\n🚀 Creating individual webhooks for each token...\n`);
+
+  let webhooksCreated = 0;
+  let webhooksFailed = 0;
+  const webhookIds: string[] = [];
+  const results: Array<{
+    token: string;
+    chain_id: number;
+    webhook_id: string | null;
+    status: string;
+    addresses_count: number;
+  }> = [];
+
+  for (const { value: tokenData } of tokensToProcess) {
+    const { token_address, chain_id, symbol, blockchain, holders } = tokenData;
+
+    // Get top 3 holder addresses (or fewer if less available)
+    const topHolders = holders.slice(0, 3);
+    const holderAddresses = topHolders
+      .map(h => h.wallet_address)
+      .filter(addr => addr && addr.length > 0);
+
+    if (holderAddresses.length === 0) {
+      console.log(`⚠️ Skipping ${symbol} on ${blockchain} - no holder addresses found`);
+      results.push({
+        token: symbol,
+        chain_id: chain_id,
+        webhook_id: null,
+        status: "skipped_no_addresses",
+        addresses_count: 0,
+      });
+      webhooksFailed++;
+      continue;
+    }
+
+    // Create webhook name
+    const webhookName = `Whale Tracker - ${symbol} on ${blockchain}`;
+
+    console.log(`📤 [${webhooksCreated + webhooksFailed + 1}/${tokenCount}] Creating webhook for ${symbol} on ${blockchain}...`);
+    console.log(`   Token: ${token_address}`);
+    console.log(`   Chain: ${chain_id}`);
+    console.log(`   Top holders: ${holderAddresses.length}`);
+
+    // Create webhook with token_address filter
+    const webhook = await createWebhook(
+      webhookName,
+      holderAddresses,
+      [chain_id],        // Single chain
+      token_address      // Token filter
+    );
+
+    if (webhook && webhook.id) {
+      // Store webhook ID with full token metadata
+      const webhookKey = ["webhooks", "ids", webhook.id];
+      await kv.set(webhookKey, {
+        id: webhook.id,
+        name: webhookName,
+        token_address: token_address,
+        chain_id: chain_id,
+        symbol: symbol,
+        blockchain: blockchain,
+        holder_addresses: holderAddresses,
+        addresses_count: holderAddresses.length,
+        created_at: nowISO(),
+      });
+
+      // Also store a reverse lookup by token
+      const tokenWebhookKey = ["webhooks", "by_token", chain_id.toString(), token_address.toLowerCase()];
+      await kv.set(tokenWebhookKey, {
+        webhook_id: webhook.id,
+        symbol: symbol,
+      });
+
+      webhookIds.push(webhook.id);
+      webhooksCreated++;
+      results.push({
+        token: symbol,
+        chain_id: chain_id,
+        webhook_id: webhook.id,
+        status: "success",
+        addresses_count: holderAddresses.length,
+      });
+
+      console.log(`   ✅ Webhook created: ${webhook.id}\n`);
+    } else {
+      webhooksFailed++;
+      results.push({
+        token: symbol,
+        chain_id: chain_id,
+        webhook_id: null,
+        status: "failed",
+        addresses_count: holderAddresses.length,
+      });
+      console.log(`   ❌ Failed to create webhook\n`);
+    }
+
+    // Rate limiting: Sim APIs allows max 5 req/sec
+    await rateLimitedDelay();
+  }
+
+  console.log(`\n${"=".repeat(60)}`);
+  console.log(`✅ Webhook creation complete!`);
+  console.log(`   Created: ${webhooksCreated}/${tokenCount} webhooks`);
+  console.log(`   Failed: ${webhooksFailed}/${tokenCount}`);
+  console.log(`${"=".repeat(60)}\n`);
+
+  return {
+    success: webhooksCreated > 0,
+    webhooks_created: webhooksCreated,
+    webhooks_failed: webhooksFailed,
+    total_tokens: tokenCount,
+    webhook_ids: webhookIds,
+    results: results,
+  };
 }
 
 async function getSetupStatus() {
@@ -789,6 +895,84 @@ Deno.serve(async (req) => {
       );
     } catch (error) {
       console.error("❌ Error getting whales:", error);
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: error.message,
+        }, null, 2),
+        { status: 500, headers: { "content-type": "application/json; charset=utf-8" } }
+      );
+    }
+  }
+
+  // ========== SETUP: TOP HOLDERS ==========
+  // Returns top 3 holders for each token in a structured format
+  if (pathname === "/setup/top-holders" && req.method === "GET") {
+    try {
+      console.log("📥 Retrieving top holders for all tokens...");
+      
+      const tokens: Array<{
+        symbol: string;
+        blockchain: string;
+        chain_id: number;
+        token_address: string;
+        top_holders: Array<{
+          rank: number;
+          address: string;
+          balance: string;
+        }>;
+        fetched_at: string;
+      }> = [];
+
+      const entries = kv.list({ prefix: ["whales"] });
+      for await (const entry of entries) {
+        const data = entry.value as {
+          token_address: string;
+          chain_id: number;
+          symbol: string;
+          blockchain: string;
+          holders: Array<{ wallet_address: string; balance?: string }>;
+          fetched_at: string;
+        };
+
+        const topHolders = data.holders.slice(0, 3).map((holder, index) => ({
+          rank: index + 1,
+          address: holder.wallet_address,
+          balance: holder.balance || "unknown",
+        }));
+
+        tokens.push({
+          symbol: data.symbol,
+          blockchain: data.blockchain,
+          chain_id: data.chain_id,
+          token_address: data.token_address,
+          top_holders: topHolders,
+          fetched_at: data.fetched_at,
+        });
+      }
+
+      // Sort by blockchain then symbol for readability
+      tokens.sort((a, b) => {
+        if (a.blockchain !== b.blockchain) {
+          return a.blockchain.localeCompare(b.blockchain);
+        }
+        return a.symbol.localeCompare(b.symbol);
+      });
+
+      console.log(`✅ Retrieved top holders for ${tokens.length} tokens`);
+
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          tokens_count: tokens.length,
+          total_holders: tokens.reduce((sum, t) => sum + t.top_holders.length, 0),
+          tokens: tokens,
+          duration_ms: Math.round(performance.now() - start),
+        }, null, 2),
+        { status: 200, headers: { "content-type": "application/json; charset=utf-8" } }
+      );
+    } catch (error) {
+      console.error("❌ Error getting top holders:", error);
       return new Response(
         JSON.stringify({
           ok: false,

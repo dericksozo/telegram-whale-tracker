@@ -1108,6 +1108,11 @@ Deno.serve(async (req) => {
       
       // Loop through all pages until next_offset is null/undefined
       do {
+        // Rate limit between page fetches (after first page)
+        if (pageCount > 0) {
+          await rateLimitedDelay();
+        }
+        
         pageCount++;
         let listUrl = "https://api.sim.dune.com/beta/evm/subscriptions/webhooks?limit=100";
         if (nextOffset) {
@@ -1179,6 +1184,11 @@ Deno.serve(async (req) => {
       
       // Loop through all pages of webhooks
       do {
+        // Rate limit between page fetches (after first page)
+        if (pageCount > 0) {
+          await rateLimitedDelay();
+        }
+        
         pageCount++;
         let listUrl = "https://api.sim.dune.com/beta/evm/subscriptions/webhooks?limit=100";
         if (nextOffset) {
@@ -1267,6 +1277,11 @@ Deno.serve(async (req) => {
       
       // Loop through all pages of webhooks
       do {
+        // Rate limit between page fetches (after first page)
+        if (pageCount > 0) {
+          await rateLimitedDelay();
+        }
+        
         pageCount++;
         let listUrl = "https://api.sim.dune.com/beta/evm/subscriptions/webhooks?limit=100";
         if (nextOffset) {

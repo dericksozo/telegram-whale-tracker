@@ -1097,32 +1097,57 @@ Deno.serve(async (req) => {
   }
 
   // ========== SETUP: VIEW WEBHOOKS ==========
+  // Fetches all webhooks across all pages
   if (pathname === "/setup/view-webhooks" && req.method === "GET") {
     try {
-      const url = "https://api.sim.dune.com/beta/evm/subscriptions/webhooks";
-      console.log("🔍 Fetching webhooks from Sim API...");
+      console.log("🔍 Fetching all webhooks from Sim API...");
       
-      const response = await fetch(url, {
-        method: "GET",
-        headers: {
-          "X-Sim-Api-Key": SIM_API_KEY,
-        },
-      });
+      const allWebhooks: Array<Record<string, unknown>> = [];
+      let nextOffset: string | null = null;
+      let pageCount = 0;
+      
+      // Loop through all pages until next_offset is null/undefined
+      do {
+        pageCount++;
+        let listUrl = "https://api.sim.dune.com/beta/evm/subscriptions/webhooks?limit=100";
+        if (nextOffset) {
+          listUrl += `&offset=${nextOffset}`;
+        }
+        
+        console.log(`📄 Fetching page ${pageCount}...`);
+        
+        const response = await fetch(listUrl, {
+          method: "GET",
+          headers: { "X-Sim-Api-Key": SIM_API_KEY },
+        });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Failed to fetch webhooks: ${response.status} ${errorText}`);
-      }
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`Failed to fetch webhooks: ${response.status} ${errorText}`);
+        }
 
-      const data = await response.json();
-      console.log(`✅ Retrieved ${data?.webhooks?.length || 0} webhook(s)`);
+        const data = await response.json();
+        const webhooks = data.webhooks || [];
+        allWebhooks.push(...webhooks);
+        nextOffset = data.next_offset || null;
+        
+        console.log(`   Found ${webhooks.length} webhook(s) on page ${pageCount} (next_offset: ${nextOffset || 'none'})`);
+      } while (nextOffset);
+      
+      // Count active vs paused
+      const activeCount = allWebhooks.filter(w => w.active).length;
+      const pausedCount = allWebhooks.filter(w => !w.active).length;
+      
+      console.log(`✅ Retrieved ${allWebhooks.length} total webhook(s) across ${pageCount} page(s)`);
 
       return new Response(
         JSON.stringify({
           ok: true,
-          count: data?.webhooks?.length || 0,
-          webhooks: data.webhooks || [],
-          next_offset: data.next_offset || null,
+          count: allWebhooks.length,
+          active_count: activeCount,
+          paused_count: pausedCount,
+          pages_fetched: pageCount,
+          webhooks: allWebhooks,
           duration_ms: Math.round(performance.now() - start),
         }, null, 2),
         { status: 200, headers: { "content-type": "application/json; charset=utf-8" } }
@@ -1132,7 +1157,7 @@ Deno.serve(async (req) => {
       return new Response(
         JSON.stringify({
           ok: false,
-          error: error.message,
+          error: (error as Error).message,
         }, null, 2),
         { status: 500, headers: { "content-type": "application/json; charset=utf-8" } }
       );
@@ -1140,61 +1165,76 @@ Deno.serve(async (req) => {
   }
 
   // ========== SETUP: PAUSE WEBHOOKS ==========
-  // Pause all webhooks (set active: false)
+  // Pause all webhooks (set active: false) - handles pagination
   if (pathname === "/setup/pause-webhooks" && (req.method === "GET" || req.method === "POST")) {
     try {
       console.log("⏸️ Pausing all webhooks...");
       
-      // First, fetch all webhooks from Sim API
-      const listUrl = "https://api.sim.dune.com/beta/evm/subscriptions/webhooks";
-      const listResponse = await fetch(listUrl, {
-        method: "GET",
-        headers: { "X-Sim-Api-Key": SIM_API_KEY },
-      });
-
-      if (!listResponse.ok) {
-        const errorText = await listResponse.text();
-        throw new Error(`Failed to fetch webhooks: ${listResponse.status} ${errorText}`);
-      }
-
-      const listData = await listResponse.json();
-      const webhooks = listData.webhooks || [];
-      
-      console.log(`📊 Found ${webhooks.length} webhook(s) to pause`);
-
       let paused = 0;
       let failed = 0;
+      let alreadyPaused = 0;
       const results: Array<{ id: string; status: string }> = [];
-
-      for (const webhook of webhooks) {
-        if (!webhook.active) {
-          console.log(`  ℹ️ Webhook ${webhook.id} already paused, skipping`);
-          results.push({ id: webhook.id, status: "already_paused" });
-          continue;
-        }
-
-        const result = await updateWebhookActive(webhook.id, false);
-        if (result) {
-          paused++;
-          results.push({ id: webhook.id, status: "paused" });
-        } else {
-          failed++;
-          results.push({ id: webhook.id, status: "failed" });
+      let nextOffset: string | null = null;
+      let pageCount = 0;
+      
+      // Loop through all pages of webhooks
+      do {
+        pageCount++;
+        let listUrl = "https://api.sim.dune.com/beta/evm/subscriptions/webhooks?limit=100";
+        if (nextOffset) {
+          listUrl += `&offset=${nextOffset}`;
         }
         
-        // Rate limiting
-        await rateLimitedDelay();
-      }
+        console.log(`📄 Fetching page ${pageCount}...`);
+        
+        const listResponse = await fetch(listUrl, {
+          method: "GET",
+          headers: { "X-Sim-Api-Key": SIM_API_KEY },
+        });
 
-      console.log(`\n✅ Pause complete: ${paused} paused, ${failed} failed`);
+        if (!listResponse.ok) {
+          const errorText = await listResponse.text();
+          throw new Error(`Failed to fetch webhooks: ${listResponse.status} ${errorText}`);
+        }
+
+        const listData = await listResponse.json();
+        const webhooks = listData.webhooks || [];
+        nextOffset = listData.next_offset || null;
+        
+        console.log(`📊 Found ${webhooks.length} webhook(s) on page ${pageCount} (next_offset: ${nextOffset || 'none'})`);
+
+        for (const webhook of webhooks) {
+          if (!webhook.active) {
+            alreadyPaused++;
+            results.push({ id: webhook.id, status: "already_paused" });
+            continue;
+          }
+
+          const result = await updateWebhookActive(webhook.id, false);
+          if (result) {
+            paused++;
+            results.push({ id: webhook.id, status: "paused" });
+          } else {
+            failed++;
+            results.push({ id: webhook.id, status: "failed" });
+          }
+          
+          // Rate limiting
+          await rateLimitedDelay();
+        }
+      } while (nextOffset);
+
+      console.log(`\n✅ Pause complete: ${paused} paused, ${alreadyPaused} already paused, ${failed} failed (${pageCount} pages processed)`);
 
       return new Response(
         JSON.stringify({
           ok: true,
           message: "Webhooks paused",
-          total: webhooks.length,
+          total: results.length,
           paused: paused,
+          already_paused: alreadyPaused,
           failed: failed,
+          pages_processed: pageCount,
           results: results,
           duration_ms: Math.round(performance.now() - start),
         }, null, 2),
@@ -1213,61 +1253,76 @@ Deno.serve(async (req) => {
   }
 
   // ========== SETUP: RESUME WEBHOOKS ==========
-  // Resume all webhooks (set active: true)
+  // Resume all webhooks (set active: true) - handles pagination
   if (pathname === "/setup/resume-webhooks" && (req.method === "GET" || req.method === "POST")) {
     try {
       console.log("▶️ Resuming all webhooks...");
       
-      // First, fetch all webhooks from Sim API
-      const listUrl = "https://api.sim.dune.com/beta/evm/subscriptions/webhooks";
-      const listResponse = await fetch(listUrl, {
-        method: "GET",
-        headers: { "X-Sim-Api-Key": SIM_API_KEY },
-      });
-
-      if (!listResponse.ok) {
-        const errorText = await listResponse.text();
-        throw new Error(`Failed to fetch webhooks: ${listResponse.status} ${errorText}`);
-      }
-
-      const listData = await listResponse.json();
-      const webhooks = listData.webhooks || [];
-      
-      console.log(`📊 Found ${webhooks.length} webhook(s) to resume`);
-
       let resumed = 0;
       let failed = 0;
+      let alreadyActive = 0;
       const results: Array<{ id: string; status: string }> = [];
-
-      for (const webhook of webhooks) {
-        if (webhook.active) {
-          console.log(`  ℹ️ Webhook ${webhook.id} already active, skipping`);
-          results.push({ id: webhook.id, status: "already_active" });
-          continue;
-        }
-
-        const result = await updateWebhookActive(webhook.id, true);
-        if (result) {
-          resumed++;
-          results.push({ id: webhook.id, status: "resumed" });
-        } else {
-          failed++;
-          results.push({ id: webhook.id, status: "failed" });
+      let nextOffset: string | null = null;
+      let pageCount = 0;
+      
+      // Loop through all pages of webhooks
+      do {
+        pageCount++;
+        let listUrl = "https://api.sim.dune.com/beta/evm/subscriptions/webhooks?limit=100";
+        if (nextOffset) {
+          listUrl += `&offset=${nextOffset}`;
         }
         
-        // Rate limiting
-        await rateLimitedDelay();
-      }
+        console.log(`📄 Fetching page ${pageCount}...`);
+        
+        const listResponse = await fetch(listUrl, {
+          method: "GET",
+          headers: { "X-Sim-Api-Key": SIM_API_KEY },
+        });
 
-      console.log(`\n✅ Resume complete: ${resumed} resumed, ${failed} failed`);
+        if (!listResponse.ok) {
+          const errorText = await listResponse.text();
+          throw new Error(`Failed to fetch webhooks: ${listResponse.status} ${errorText}`);
+        }
+
+        const listData = await listResponse.json();
+        const webhooks = listData.webhooks || [];
+        nextOffset = listData.next_offset || null;
+        
+        console.log(`📊 Found ${webhooks.length} webhook(s) on page ${pageCount} (next_offset: ${nextOffset || 'none'})`);
+
+        for (const webhook of webhooks) {
+          if (webhook.active) {
+            alreadyActive++;
+            results.push({ id: webhook.id, status: "already_active" });
+            continue;
+          }
+
+          const result = await updateWebhookActive(webhook.id, true);
+          if (result) {
+            resumed++;
+            results.push({ id: webhook.id, status: "resumed" });
+          } else {
+            failed++;
+            results.push({ id: webhook.id, status: "failed" });
+          }
+          
+          // Rate limiting
+          await rateLimitedDelay();
+        }
+      } while (nextOffset);
+
+      console.log(`\n✅ Resume complete: ${resumed} resumed, ${alreadyActive} already active, ${failed} failed (${pageCount} pages processed)`);
 
       return new Response(
         JSON.stringify({
           ok: true,
           message: "Webhooks resumed",
-          total: webhooks.length,
+          total: results.length,
           resumed: resumed,
+          already_active: alreadyActive,
           failed: failed,
+          pages_processed: pageCount,
           results: results,
           duration_ms: Math.round(performance.now() - start),
         }, null, 2),

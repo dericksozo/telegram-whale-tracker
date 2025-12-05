@@ -1104,10 +1104,12 @@ Deno.serve(async (req) => {
       
       const allWebhooks: Array<Record<string, unknown>> = [];
       let nextOffset: string | null = null;
+      let previousOffset: string | null = null;
       let pageCount = 0;
+      const MAX_PAGES = 10; // Safety limit: 10 pages * 100 = 1000 webhooks max
       
-      // Loop through all pages until next_offset is null/undefined
-      do {
+      // Loop through all pages until next_offset is null/undefined or we hit safety limits
+      while (pageCount < MAX_PAGES) {
         // Rate limit between page fetches (after first page)
         if (pageCount > 0) {
           await rateLimitedDelay();
@@ -1134,10 +1136,24 @@ Deno.serve(async (req) => {
         const data = await response.json();
         const webhooks = data.webhooks || [];
         allWebhooks.push(...webhooks);
+        
+        previousOffset = nextOffset;
         nextOffset = data.next_offset || null;
         
         console.log(`   Found ${webhooks.length} webhook(s) on page ${pageCount} (next_offset: ${nextOffset || 'none'})`);
-      } while (nextOffset);
+        
+        // Stop if: no more pages, no webhooks returned, or same offset (infinite loop detection)
+        if (!nextOffset || webhooks.length === 0 || nextOffset === previousOffset) {
+          if (nextOffset === previousOffset && nextOffset !== null) {
+            console.log(`⚠️ Detected duplicate offset, stopping pagination`);
+          }
+          break;
+        }
+      }
+      
+      if (pageCount >= MAX_PAGES) {
+        console.log(`⚠️ Reached maximum page limit (${MAX_PAGES})`);
+      }
       
       // Count active vs paused
       const activeCount = allWebhooks.filter(w => w.active).length;
@@ -1180,10 +1196,12 @@ Deno.serve(async (req) => {
       let alreadyPaused = 0;
       const results: Array<{ id: string; status: string }> = [];
       let nextOffset: string | null = null;
+      let previousOffset: string | null = null;
       let pageCount = 0;
+      const MAX_PAGES = 10; // Safety limit: 10 pages * 100 = 1000 webhooks max
       
-      // Loop through all pages of webhooks
-      do {
+      // Loop through all pages of webhooks with safety limits
+      while (pageCount < MAX_PAGES) {
         // Rate limit between page fetches (after first page)
         if (pageCount > 0) {
           await rateLimitedDelay();
@@ -1209,6 +1227,8 @@ Deno.serve(async (req) => {
 
         const listData = await listResponse.json();
         const webhooks = listData.webhooks || [];
+        
+        previousOffset = nextOffset;
         nextOffset = listData.next_offset || null;
         
         console.log(`📊 Found ${webhooks.length} webhook(s) on page ${pageCount} (next_offset: ${nextOffset || 'none'})`);
@@ -1232,7 +1252,19 @@ Deno.serve(async (req) => {
           // Rate limiting
           await rateLimitedDelay();
         }
-      } while (nextOffset);
+        
+        // Stop if: no more pages, no webhooks returned, or same offset (infinite loop detection)
+        if (!nextOffset || webhooks.length === 0 || nextOffset === previousOffset) {
+          if (nextOffset === previousOffset && nextOffset !== null) {
+            console.log(`⚠️ Detected duplicate offset, stopping pagination`);
+          }
+          break;
+        }
+      }
+      
+      if (pageCount >= MAX_PAGES) {
+        console.log(`⚠️ Reached maximum page limit (${MAX_PAGES})`);
+      }
 
       console.log(`\n✅ Pause complete: ${paused} paused, ${alreadyPaused} already paused, ${failed} failed (${pageCount} pages processed)`);
 
@@ -1273,10 +1305,12 @@ Deno.serve(async (req) => {
       let alreadyActive = 0;
       const results: Array<{ id: string; status: string }> = [];
       let nextOffset: string | null = null;
+      let previousOffset: string | null = null;
       let pageCount = 0;
+      const MAX_PAGES = 10; // Safety limit: 10 pages * 100 = 1000 webhooks max
       
-      // Loop through all pages of webhooks
-      do {
+      // Loop through all pages of webhooks with safety limits
+      while (pageCount < MAX_PAGES) {
         // Rate limit between page fetches (after first page)
         if (pageCount > 0) {
           await rateLimitedDelay();
@@ -1302,6 +1336,8 @@ Deno.serve(async (req) => {
 
         const listData = await listResponse.json();
         const webhooks = listData.webhooks || [];
+        
+        previousOffset = nextOffset;
         nextOffset = listData.next_offset || null;
         
         console.log(`📊 Found ${webhooks.length} webhook(s) on page ${pageCount} (next_offset: ${nextOffset || 'none'})`);
@@ -1325,7 +1361,19 @@ Deno.serve(async (req) => {
           // Rate limiting
           await rateLimitedDelay();
         }
-      } while (nextOffset);
+        
+        // Stop if: no more pages, no webhooks returned, or same offset (infinite loop detection)
+        if (!nextOffset || webhooks.length === 0 || nextOffset === previousOffset) {
+          if (nextOffset === previousOffset && nextOffset !== null) {
+            console.log(`⚠️ Detected duplicate offset, stopping pagination`);
+          }
+          break;
+        }
+      }
+      
+      if (pageCount >= MAX_PAGES) {
+        console.log(`⚠️ Reached maximum page limit (${MAX_PAGES})`);
+      }
 
       console.log(`\n✅ Resume complete: ${resumed} resumed, ${alreadyActive} already active, ${failed} failed (${pageCount} pages processed)`);
 

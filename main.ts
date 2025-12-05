@@ -4,8 +4,6 @@
 
 /// <reference lib="deno.unstable" />
 
-
-
 // ============== CONFIGURATION ==============
 
 const SIM_API_KEY = Deno.env.get("SIM_API_KEY") || "sim_3HEp7EPlougJMPs9GhCOXVjqwyfwIhO0";
